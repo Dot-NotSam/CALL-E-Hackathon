@@ -10,7 +10,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { Inbox, Plus, RotateCw, ShieldOff } from "lucide-react";
+import { Inbox, RotateCw, ShieldOff, UserPlus } from "lucide-react";
 import type { Order } from "@/lib/contracts/domain";
 import { useOrderFeed } from "@/hooks/useOrderFeed";
 import { Panel, EmptyState, Skeleton } from "@/components/ui/Panel";
@@ -62,8 +62,8 @@ export function OrdersBoard() {
           </p>
         </div>
         <Link href="/ops/simulator" className={buttonStyles({ variant: "primary", size: "md" })}>
-          <Plus className="h-4 w-4" aria-hidden />
-          New order
+          <UserPlus className="h-4 w-4" aria-hidden />
+          Add Customer
         </Link>
       </header>
 

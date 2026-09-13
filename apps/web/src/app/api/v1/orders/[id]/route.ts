@@ -1,24 +1,19 @@
 import { NextResponse } from "next/server";
-import { getRun } from "@/lib/mock/store";
+import { getOrder } from "@/lib/db/orders-repository";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/v1/orders/:id — the order, its contact ladder, and whether the run has ended. */
+/** GET /api/v1/orders/:id — single order detail, contact ladder, and finished status. */
 export async function GET(
   _request: Request,
-  { params }: { params: Promise<{ id: string }> },
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const run = getRun(id);
+  const data = await getOrder(id);
 
-  if (!run) {
+  if (!data) {
     return NextResponse.json({ error: "not_found", message: `No order ${id}` }, { status: 404 });
   }
 
-  return NextResponse.json({
-    order: run.order,
-    ladder: run.ladder,
-    finished: run.finished,
-    source: "mock",
-  });
+  return NextResponse.json(data);
 }

@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
-import { isKillSwitchEngaged, setKillSwitch } from "@/lib/mock/store";
+import { isKillSwitchEngaged, setKillSwitch } from "@/lib/db/orders-repository";
 
 export const dynamic = "force-dynamic";
 
-/** CLAUDE.md §8.2 / §12 — the global halt on outbound calling. */
+/** CLAUDE.md §8.2 / §12 — global halt on outbound calling. */
 export async function GET() {
-  return NextResponse.json({ engaged: isKillSwitchEngaged() });
+  const engaged = await isKillSwitchEngaged();
+  return NextResponse.json({ engaged });
 }
 
 export async function POST(request: Request) {
@@ -19,6 +20,6 @@ export async function POST(request: Request) {
     );
   }
 
-  const engaged = setKillSwitch(body.engaged !== false);
+  const engaged = await setKillSwitch(body.engaged !== false);
   return NextResponse.json({ engaged });
 }

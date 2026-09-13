@@ -71,12 +71,12 @@ export function Hero() {
         </p>
 
         <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
-          <Link href="/ops" className={cn(buttonStyles({ variant: "primary", size: "lg" }), "group")}>
+          <Link href="/login" className={cn(buttonStyles({ variant: "primary", size: "lg" }), "group")}>
             Open operations
             <ArrowRight className="h-4 w-4 transition-transform duration-150 group-hover:translate-x-0.5" aria-hidden />
           </Link>
           <Link href="/ops/simulator" className={buttonStyles({ variant: "neutral", size: "lg" })}>
-            Place an order
+            Add new customer
           </Link>
         </div>
 

@@ -1,27 +1,28 @@
 "use client";
 
-/**
- * The operations shell — the frame every /ops screen renders inside.
- *
- * Fixed to the viewport (`h-dvh` + `overflow-hidden`) so that screens which
- * must not scroll can claim a definite height and scroll their own regions
- * instead. The Live Call Theatre depends on this: its payoff strip has to stay
- * on screen at 1440×900, which is the recording resolution.
- */
-
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { Octagon } from "lucide-react";
 import { CommandBar, useKillSwitch } from "./CommandBar";
 import { NavRail, NavStrip } from "./Navigation";
+import { useAuth } from "@/lib/auth/auth-context";
 
 export function OpsShell({ children }: { children: React.ReactNode }) {
   const killSwitch = useKillSwitch();
+  const { user, loading } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!loading && !user) {
+      router.push("/login");
+    }
+  }, [user, loading, router]);
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-canvas">
       <CommandBar killSwitch={killSwitch} />
 
-      {/* A halted system says so in persistent UI. §13 lists a toast for
-          critical state as an anti-pattern — it disappears, and this must not. */}
+      {/* A halted system says so in persistent UI. */}
       {killSwitch.engaged && (
         <div
           role="status"

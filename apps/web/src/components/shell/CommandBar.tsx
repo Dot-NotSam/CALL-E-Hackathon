@@ -3,15 +3,11 @@
 /**
  * The command bar — facility identity on the left, operator controls on the
  * right, and the kill switch always reachable.
- *
- * The kill switch is a §12 safety control, not a preference: it is a global
- * halt on outbound calling, enforced server-side, and it is never hidden behind
- * a menu. Theme and sound are per-operator preferences and persist locally.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Moon, Octagon, ShieldAlert, Sun, Volume2, VolumeX } from "lucide-react";
+import { Moon, Octagon, ShieldAlert, Sun, Volume2, VolumeX, LogOut, LogIn, User } from "lucide-react";
 import { StateChip } from "@/components/ui/StateChip";
 import { Button } from "@/components/ui/Button";
 import { apiGet, apiPost, IS_MOCK } from "@/lib/api";
@@ -20,10 +16,11 @@ import { useClientValue, useNow } from "@/hooks/useClientValue";
 import { BUYER, WORKING_HOURS } from "@/lib/mock/directory";
 import { formatters } from "@/lib/time";
 import { BrandMark } from "@/components/ui/BrandMark";
+import { RoleSelector } from "./role-selector";
+import { useAuth } from "@/lib/auth/auth-context";
 
 const THEME_STORAGE_KEY = "sentinel.theme";
 
-/** Module scope keeps the reader stable for useSyncExternalStore. */
 function readTheme(): "dark" | "light" {
   return document.documentElement.dataset.theme === "light" ? "light" : "dark";
 }
@@ -46,10 +43,6 @@ export interface KillSwitchState {
   toggle: () => void;
 }
 
-/**
- * Kill-switch state lives here and is lifted to the shell, which needs it for
- * the persistent banner. Read once on mount, then owned by this control.
- */
 export function useKillSwitch(): KillSwitchState {
   const [engaged, setEngaged] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -60,10 +53,7 @@ export function useKillSwitch(): KillSwitchState {
       .then((result) => {
         if (!cancelled) setEngaged(result.engaged);
       })
-      .catch(() => {
-        /* The banner stays hidden and the button still works — the operator
-           can engage it, which is the direction that matters for safety. */
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -73,9 +63,7 @@ export function useKillSwitch(): KillSwitchState {
     setBusy(true);
     apiPost<{ engaged: boolean }>("/api/v1/killswitch", { engaged: !engaged })
       .then((result) => setEngaged(result.engaged))
-      .catch(() => {
-        /* Leave the state as-is; the button re-enables so it can be retried. */
-      })
+      .catch(() => {})
       .finally(() => setBusy(false));
   }, [engaged]);
 
@@ -83,8 +71,7 @@ export function useKillSwitch(): KillSwitchState {
 }
 
 export function CommandBar({ killSwitch }: { killSwitch: KillSwitchState }) {
-  /* Theme and sound live in the browser, so they are read as client snapshots
-     and only shadowed once the operator changes them here. */
+  const { user, profile, signOut, switchRole } = useAuth();
   const storedTheme = useClientValue(readTheme, "dark");
   const storedSound = useClientValue(isSoundEnabled, false);
   const [chosenTheme, setChosenTheme] = useState<"dark" | "light" | null>(null);
@@ -97,9 +84,7 @@ export function CommandBar({ killSwitch }: { killSwitch: KillSwitchState }) {
     document.documentElement.dataset.theme = next;
     try {
       localStorage.setItem(THEME_STORAGE_KEY, next);
-    } catch {
-      /* Private mode — the choice still holds for this session. */
-    }
+    } catch {}
     setChosenTheme(next);
   }, []);
 
@@ -136,6 +121,8 @@ export function CommandBar({ killSwitch }: { killSwitch: KillSwitchState }) {
           </StateChip>
         )}
 
+        <RoleSelector currentRole={profile?.role} onRoleChange={(r) => switchRole(r)} />
+
         <span className="hidden h-4 w-px bg-line sm:block" aria-hidden />
 
         <Button
@@ -146,7 +133,6 @@ export function CommandBar({ killSwitch }: { killSwitch: KillSwitchState }) {
           title={sound ? "Mute call cues" : "Enable call cues"}
         >
           {sound ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
-          <span className="sr-only">{sound ? "Mute call cues" : "Enable call cues"}</span>
         </Button>
 
         <Button
@@ -156,7 +142,6 @@ export function CommandBar({ killSwitch }: { killSwitch: KillSwitchState }) {
           title={theme === "dark" ? "Switch to light" : "Switch to dark"}
         >
           {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          <span className="sr-only">Toggle colour theme</span>
         </Button>
 
         <Button
@@ -171,10 +156,26 @@ export function CommandBar({ killSwitch }: { killSwitch: KillSwitchState }) {
           <span className="hidden whitespace-nowrap md:inline">
             {killSwitch.engaged ? "Calling halted" : "Kill switch"}
           </span>
-          <span className="sr-only md:hidden">
-            {killSwitch.engaged ? "Release the kill switch" : "Engage the kill switch"}
-          </span>
         </Button>
+
+        {user ? (
+          <div className="flex items-center gap-2 pl-2 border-l border-line">
+            <div className="hidden sm:flex flex-col text-right">
+              <span className="text-xs font-semibold text-ink leading-tight">{profile?.fullName}</span>
+              <span className="micro text-ink-dim leading-tight">{profile?.email}</span>
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => signOut()} title="Sign out">
+              <LogOut className="h-4 w-4 text-red-600" />
+            </Button>
+          </div>
+        ) : (
+          <Link href="/login" className="pl-1">
+            <Button variant="neutral" size="sm" className="gap-1">
+              <LogIn className="h-3.5 w-3.5" />
+              <span>Login</span>
+            </Button>
+          </Link>
+        )}
       </div>
     </header>
   );
