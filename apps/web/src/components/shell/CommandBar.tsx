@@ -103,9 +103,11 @@ export function CommandBar({ killSwitch }: { killSwitch: KillSwitchState }) {
       <span className="hidden h-4 w-px bg-line sm:block" aria-hidden />
 
       <div className="hidden min-w-0 flex-col lg:flex">
-        <span className="truncate text-xs font-semibold leading-tight text-ink">{BUYER.name}</span>
+        <span className="truncate text-xs font-semibold leading-tight text-ink">
+          {profile?.wholesalerName || profile?.fullName || BUYER.name}
+        </span>
         <span className="micro leading-tight">
-          Operations · working hours {WORKING_HOURS.start}–{WORKING_HOURS.end} IST
+          {profile?.location ? `${profile.location} · Operations` : `Operations · working hours ${WORKING_HOURS.start}–${WORKING_HOURS.end} IST`}
         </span>
       </div>
 
@@ -160,10 +162,19 @@ export function CommandBar({ killSwitch }: { killSwitch: KillSwitchState }) {
 
         {user ? (
           <div className="flex items-center gap-2 pl-2 border-l border-line">
-            <div className="hidden sm:flex flex-col text-right">
-              <span className="text-xs font-semibold text-ink leading-tight">{profile?.fullName}</span>
-              <span className="micro text-ink-dim leading-tight">{profile?.email}</span>
-            </div>
+            <Link
+              href="/ops/profile"
+              className="flex items-center gap-2 hover:opacity-80 transition-opacity"
+              title="Edit Wholesaler Profile"
+            >
+              <div className="h-7 w-7 rounded-full bg-lilac/20 text-lilac font-bold text-xs flex items-center justify-center border border-lilac/40 shrink-0">
+                {profile?.fullName?.charAt(0) || "W"}
+              </div>
+              <div className="hidden sm:flex flex-col text-right">
+                <span className="text-xs font-semibold text-ink leading-tight">{profile?.fullName}</span>
+                <span className="micro text-ink-dim leading-tight">{profile?.wholesalerName || profile?.email}</span>
+              </div>
+            </Link>
             <Button variant="ghost" size="sm" onClick={() => signOut()} title="Sign out">
               <LogOut className="h-4 w-4 text-red-600" />
             </Button>

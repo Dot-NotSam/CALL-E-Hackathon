@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { Octagon } from "lucide-react";
 import { CommandBar, useKillSwitch } from "./CommandBar";
 import { NavRail, NavStrip } from "./Navigation";
@@ -9,14 +9,25 @@ import { useAuth } from "@/lib/auth/auth-context";
 
 export function OpsShell({ children }: { children: React.ReactNode }) {
   const killSwitch = useKillSwitch();
-  const { user, loading } = useAuth();
+  const { user, role, loading } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
     if (!loading && !user) {
       router.push("/login");
+      return;
     }
-  }, [user, loading, router]);
+
+    if (!loading && user) {
+      // Auto-update rendered page route when role changes
+      if (role === "ADMIN" && pathname !== "/ops/admin" && pathname !== "/admin") {
+        router.push("/ops/admin");
+      } else if (role === "DISTRIBUTOR" && (pathname === "/ops/admin" || pathname === "/admin")) {
+        router.push("/ops");
+      }
+    }
+  }, [user, role, loading, pathname, router]);
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-canvas">
