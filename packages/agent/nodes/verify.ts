@@ -3,128 +3,189 @@
  * Node: verify
  * Owner: Aryan
  *
- * Verification call at T+ETA — confirms the responder actually arrived.
- * This is FR-7.6 — "closing the loop twice" is what makes this an
- * operations system rather than a dialer.
+ * The follow-up call that checks a commitment was actually met (FR-5.4).
+ * Exits to: "confirm" | "escalate"
  *
- * Exits to: "resolve" | "escalate"
+ * PRD §9 lists "commitment not fulfilled" as a failure mode in its own right —
+ * a supplier saying "yes, today" and then not dispatching is the single most
+ * expensive outcome for the buyer, because it is discovered late. Verifying is
+ * what makes this an operations system rather than a dialler.
+ *
+ * This node runs when a VERIFICATION or REMAINING_QUANTITY follow-up fires. The
+ * queue re-enters the graph here with the original order state plus the new
+ * call's result.
  */
 
-import type { EscalationState } from "../state";
-import type { EscalationStructuredResult } from "../../types";
-import { lastStructuredResult } from "../state";
-import { needsBackup, etaOutsideSafeWindow } from "./decide";
-import { buildVerificationPrompt } from "../../calle/prompt";
+import type { CoordinationState } from "../state";
+import type { Contact, FollowUp, OrderOutcome } from "../../types";
+import { lastStructuredResult, toContext } from "../state";
+import { buildFollowUpPrompt } from "../../calle/prompt";
 
-export type VerifyResult = "resolve" | "escalate";
+export type VerifyResult = "confirm" | "escalate";
 
 export interface VerifyCallbacks {
-  scheduleVerificationJob: (params: {
-    incidentId: string;
-    traceId: string;
-    responderId: string;
-    etaMinutes: number;
-    runAt: string; // ISO-8601
-  }) => Promise<void>;
-  /**
-   * FR-6.4 — arrange a backup responder when the accepted commitment does not
-   * beat the safe window, or the responder asked for one. Optional so existing
-   * callers keep working, but the backend should always provide it.
-   */
-  arrangeBackup?: (params: {
-    incidentId: string;
-    traceId: string;
-    excludeResponderId: string;
-    reason: string;
-  }) => Promise<void>;
-  emitSSE: (incidentId: string, message: string) => void;
+  /** Emits `order.updated` once the verification outcome is known. */
+  updateOrder: (outcome: OrderOutcome) => Promise<void>;
+  /** Queues a further follow-up when the supplier gives a revised date. */
+  scheduleFollowUp: (followUp: FollowUp) => Promise<void>;
+  /** Marks the follow-up that triggered this run as done, so it leaves the panel. */
+  completeFollowUp?: (followUpId: string) => Promise<void>;
 }
 
-/**
- * Schedules a BullMQ job via Sameer's queue to run the verification call
- * at T+ETA minutes. The actual second CALL-E call is placed by that job.
- *
- * Returns the updated state fields.
- */
+export interface VerifyOptions {
+  /** The follow-up that triggered this verification, if the backend tracked one. */
+  followUpId?: string;
+  now?: Date;
+}
+
+export interface VerifyOutcome {
+  route: VerifyResult;
+  updates: Partial<CoordinationState>;
+  reason: string;
+}
+
 export async function verify(
-  state: EscalationState,
-  callbacks: VerifyCallbacks
-): Promise<Partial<EscalationState>> {
+  state: CoordinationState,
+  callbacks: VerifyCallbacks,
+  options: VerifyOptions = {}
+): Promise<VerifyOutcome> {
+  const now = options.now ?? new Date();
   const result = lastStructuredResult(state);
 
-  // Default ETA buffer: if no ETA was extracted, verify at T+60min
-  const etaMinutes = result?.eta_minutes ?? 60;
-
-  // Add 5-minute buffer — give responder time to actually arrive
-  const verifyAfterMinutes = etaMinutes + 5;
-  const runAt = new Date(
-    Date.now() + verifyAfterMinutes * 60 * 1000
-  ).toISOString();
-
-  await callbacks.scheduleVerificationJob({
-    incidentId: state.incidentId,
-    traceId: state.traceId,
-    responderId: state.currentResponder?.id ?? "",
-    etaMinutes: verifyAfterMinutes,
-    runAt,
-  });
-
-  callbacks.emitSSE(
-    state.incidentId,
-    `Verification call scheduled in ${verifyAfterMinutes} minutes (at ${runAt}).`
-  );
-
-  // ── FR-6.4 — a commitment that misses the safe window is not enough ───────
-  // We accept it (a late technician still beats no technician) and arrange a
-  // backup in parallel rather than waiting for T+ETA to discover the gap.
-  if (needsBackup(state)) {
-    const outsideWindow = etaOutsideSafeWindow(state);
-    const reason = outsideWindow
-      ? `ETA ${result?.eta_minutes ?? "unknown"}min exceeds the ${state.safeWindowMinutes}min safe window.`
-      : `Responder explicitly requested a backup.`;
-
-    await callbacks.arrangeBackup?.({
-      incidentId: state.incidentId,
-      traceId: state.traceId,
-      excludeResponderId: state.currentResponder?.id ?? "",
-      reason,
-    });
-
-    callbacks.emitSSE(state.incidentId, `Backup responder requested — ${reason}`);
+  if (options.followUpId) {
+    await callbacks.completeFollowUp?.(options.followUpId);
   }
 
-  return {};
+  // ── The commitment held ───────────────────────────────────────────────────
+  const dispatched =
+    result?.stock_status === "confirmed" || result?.stock_status === "partial";
+
+  if (dispatched && result?.contact_reached === "yes") {
+    const reason =
+      `${state.currentContact?.name ?? state.seller.name} confirmed dispatch against ` +
+      `${state.reference}.` +
+      (result.verbatim_commitment ? ` "${result.verbatim_commitment}"` : "");
+
+    // Write the verified outcome here rather than routing back through
+    // `confirm`. Confirm would schedule a fresh VERIFICATION follow-up, and an
+    // order that verifies itself forever never actually closes.
+    //
+    // The quantities are carried from the order, not re-read from this call:
+    // a dispatch check confirms that what was already agreed went out, and it
+    // is not an opportunity to renegotiate the amount.
+    const outcome: OrderOutcome = {
+      orderId: state.orderId,
+      contactId: state.currentContact?.id ?? null,
+      status:
+        (state.item.remainingQuantity ?? 0) > 0 ? "PARTIALLY_CONFIRMED" : "CONFIRMED",
+      committed: true,
+      confirmedQuantity: state.item.confirmedQuantity,
+      remainingQuantity: state.item.remainingQuantity,
+      unitPrice: null,
+      dispatchDate: result.dispatch_date ?? null,
+      deliveryEta: result.delivery_eta ?? null,
+      summary: reason,
+      operatorMinutesSaved: null,
+    };
+
+    await callbacks.updateOrder(outcome);
+
+    return { route: "confirm", updates: { finalOutcome: outcome }, reason };
+  }
+
+  // ── The commitment did not hold ───────────────────────────────────────────
+  // A revised date is still information: queue one more check rather than
+  // escalating straight away, but only once — a supplier who moves the date
+  // twice is escalated, not chased indefinitely.
+  // Have we already given them one second chance?
+  //
+  // The follow-up we schedule below has a fixed id, so if THIS run was
+  // triggered by that id, we are the re-check and there is no third go.
+  //
+  // The `state.followUps` scan was the original guard and it never fired: a
+  // follow-up run starts from `createInitialState`, which sets `followUps: []`,
+  // and nothing in the graph marks a follow-up DONE — `completeFollowUp` is a
+  // backend callback. So a supplier who moved the date every time was chased
+  // indefinitely, one credit per round. It is kept as a second line of defence
+  // for backends that do populate the array.
+  const revisedFollowUpId = `${state.orderId}-verification-revised`;
+
+  const alreadyChased =
+    state.followUpId === revisedFollowUpId ||
+    state.followUps.some((f) => f.kind === "VERIFICATION" && f.status === "DONE");
+
+  if (result?.dispatch_date && !alreadyChased) {
+    const followUp: FollowUp = {
+      id: revisedFollowUpId,
+      orderId: state.orderId,
+      kind: "VERIFICATION",
+      dueAt: new Date(
+        Math.max(
+          new Date(result.dispatch_date).getTime() + 30 * 60 * 1000,
+          now.getTime() + 30 * 60 * 1000
+        )
+      ).toISOString(),
+      contactId: state.currentContact?.id ?? "",
+      note: `Re-verify ${state.reference} — supplier gave a revised dispatch date`,
+      status: "SCHEDULED",
+    };
+
+    await callbacks.scheduleFollowUp(followUp);
+
+    const reason =
+      `Dispatch had not happened. ${state.currentContact?.name ?? state.seller.name} ` +
+      `gave a revised date of ${result.dispatch_date}; re-checking once.`;
+
+    const outcome: OrderOutcome = {
+      orderId: state.orderId,
+      contactId: state.currentContact?.id ?? null,
+      status: "PARTIALLY_CONFIRMED",
+      committed: true,
+      confirmedQuantity: state.item.confirmedQuantity,
+      remainingQuantity: state.item.remainingQuantity,
+      unitPrice: null,
+      dispatchDate: result.dispatch_date,
+      deliveryEta: result.delivery_eta ?? null,
+      summary: reason,
+      operatorMinutesSaved: null,
+    };
+
+    await callbacks.updateOrder(outcome);
+
+    return {
+      route: "confirm",
+      // `finalOutcome` belongs here as much as on the held path. Without it the
+      // run ends with finalOutcome null while updateOrder has already written
+      // the revised date — so the caller of runFollowUpCall cannot tell what
+      // happened, and the two verify paths report inconsistently.
+      updates: { finalOutcome: outcome, followUps: [...state.followUps, followUp] },
+      reason,
+    };
+  }
+
+  const reason =
+    `Commitment on ${state.reference} was not met and no revised date was given. ` +
+    "Escalating to the next contact.";
+
+  return { route: "escalate", updates: {}, reason };
 }
 
 /**
- * Called when the verification job fires at T+ETA.
- * Builds the short confirmation task prompt for CALL-E.
+ * Builds the task prompt for a follow-up call.
  *
- * There is exactly ONE verification prompt, in ../../calle/prompt.ts. This is
- * a thin adapter from graph state to that builder — do not inline a second
- * copy here (CLAUDE.md §6.5).
+ * There is exactly ONE follow-up prompt builder, in `packages/calle/prompt.ts`.
+ * This is a thin adapter from graph state to it — do not inline a second copy.
  */
-export function buildVerificationTaskPrompt(state: EscalationState): string {
-  if (!state.currentResponder) {
-    throw new Error(
-      `buildVerificationTaskPrompt: no currentResponder on incident ${state.incidentId}`
-    );
-  }
+export function buildVerificationTaskPrompt(
+  state: CoordinationState,
+  contact: Contact,
+  kind: "VERIFICATION" | "REMAINING_QUANTITY" = "VERIFICATION"
+): string {
+  const result = lastStructuredResult(state);
 
-  const result = lastStructuredResult(state) as EscalationStructuredResult | null;
-
-  return buildVerificationPrompt({
-    incidentId: state.incidentId,
-    traceId: state.traceId,
-    severity: state.severity,
-    // The verification call is framed around the ETA they committed to, not
-    // the original safe window.
-    safeWindowMinutes: result?.eta_minutes ?? state.safeWindowMinutes,
-    consequence: state.consequence,
-    escalationRung: state.escalationRung,
-    facility: state.facility,
-    asset: state.asset,
-    reading: state.reading,
-    responder: state.currentResponder,
+  return buildFollowUpPrompt(toContext(state), contact, kind, {
+    confirmedQuantity: state.item.confirmedQuantity ?? result?.confirmed_quantity,
+    remainingQuantity: state.item.remainingQuantity ?? result?.remaining_quantity,
+    dispatchDate: result?.dispatch_date,
   });
 }

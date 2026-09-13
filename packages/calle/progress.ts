@@ -16,7 +16,7 @@
  * should map these strings.
  */
 
-import type { CallStatus as SentinelCallState } from "../types";
+import type { CallState as SentinelCallState } from "../types";
 
 // ─── CALL-E's own vocabulary (from @call-e/calle generated schema) ───────────
 
@@ -45,6 +45,25 @@ export interface PollableAttempt {
   failureCode?: string | null;
   failureMessage?: string | null;
   transcriptTurns?: { speaker: string; text: string; offset_seconds: number | null }[];
+  /**
+   * When the dial began — but BACKFILLED, not live. Do not poll for it.
+   *
+   * OBSERVED (live call 2026-09-13, call_x2ENjL…): an attempt reported
+   * `status: "in_progress"` with `startedAt: null` for minutes before the phone
+   * rang, so `in_progress` means "CALL-E has this", NOT "the phone is ringing".
+   *
+   * OBSERVED (live call 2026-09-14, call_pTAB-O4ueJdAITNenOEA5Q): stronger and
+   * worse. `startedAt` stayed null through an ENTIRE 44-turn conversation and
+   * only appeared once the task reached `completed` — and then reported two
+   * different values on consecutive polls (19:13:05.543117Z, then 19:12:49Z).
+   *
+   * So this field cannot tell you a call is in progress. It tells you, after
+   * the fact, roughly when one was. See the poll loop for what follows.
+   */
+  startedAt?: string | null;
+  completedAt?: string | null;
+  /** Set once a provider has the call — backfilled at completion, like `startedAt`. */
+  providerCallId?: string | null;
 }
 
 export interface PollableCall {
@@ -98,7 +117,8 @@ export function latestAttempt(call: PollableCall): PollableAttempt | undefined {
 
 /**
  * Maps a polled CALL-E call onto the frozen Sentinel `CallState` union
- * (CLAUDE.md §8.3), which the dashboard's visual language keys off.
+ * (docs/FRONTEND_BACKEND_CONTRACT.md §4.3), which the dashboard's visual
+ * language keys off.
  *
  * Note the deliberate spelling shift: CALL-E says "dialing", our frozen SSE
  * contract says "dialling". Do not "fix" either side independently.
@@ -198,7 +218,11 @@ export function collectTurns(call: PollableCall): TranscriptTurn[] {
 export interface PollOptions {
   /** How often to ask CALL-E for the current state. */
   intervalMs?: number;
-  /** Hard ceiling on the whole call (FR-5.4). Exceeding it is a failure. */
+  /**
+   * Ceiling on the WHOLE call — queue plus conversation — measured from
+   * create(). It is one budget because CALL-E gives us no way to split it.
+   * See DEFAULT_CALL_TIMEOUT_MS.
+   */
   timeoutMs?: number;
   /**
    * A state the caller has already emitted (e.g. straight after create()).
@@ -210,12 +234,41 @@ export interface PollOptions {
 
 export const DEFAULT_POLL_INTERVAL_MS = 2_000;
 
-/** FR-5.4 — a call may never run longer than this. Prompt targets 90s. */
-export const DEFAULT_CALL_TIMEOUT_MS = 180_000;
+/**
+ * Ceiling on the whole call — queue plus conversation — from create().
+ *
+ * ── Why this is one budget and not two ───────────────────────────────────────
+ *
+ * It was two. Splitting them is the obvious design: bound the wait for the
+ * phone to ring separately from the conversation, so a slow queue never eats
+ * the time a real negotiation is allowed. That requires knowing when the dial
+ * starts, and CALL-E does not tell you.
+ *
+ * Everything that looks like it would: `attempt.status` reads `in_progress`
+ * from the moment the task is accepted; `startedAt` and `providerCallId` are
+ * backfilled at completion; `transcriptTurns` arrives in one burst at the end
+ * (F-006). On live call 2026-09-14 every one of those signals was still
+ * queue-shaped while a 44-turn conversation was actually happening.
+ *
+ * So there is exactly one observable event — the flip to a terminal state — and
+ * any budget that pretends otherwise cuts off real calls. One deadline, set
+ * wide enough to cover the worst we have seen end to end:
+ *
+ *   queue        ~130s (2026-09-13), >180s (2026-09-14)
+ *   conversation ~141s (2026-09-13), 44 turns (2026-09-14)
+ *
+ * 600s is roughly double that, and the cost of it being too generous is only a
+ * slow failure. The cost of it being too tight is discarding a commitment a
+ * supplier actually made — which we have now done twice.
+ */
+export const DEFAULT_CALL_TIMEOUT_MS = 600_000;
 
 export class CallTimeoutError extends Error {
   constructor(readonly callId: string, readonly timeoutMs: number) {
-    super(`CALL-E call ${callId} exceeded the ${timeoutMs}ms duration ceiling.`);
+    super(
+      `CALL-E call ${callId} did not reach a terminal state within ${timeoutMs}ms. ` +
+      "The call may still be live — CALL-E has no cancel API, so do not redial."
+    );
     this.name = "CallTimeoutError";
   }
 }
@@ -234,6 +287,7 @@ export async function pollCallToCompletion(
 ): Promise<PollableCall> {
   const intervalMs = options.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const timeoutMs = options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
+
   const deadline = Date.now() + timeoutMs;
 
   let lastState: SentinelCallState | null = options.alreadyEmitted ?? null;
@@ -265,6 +319,10 @@ export async function pollCallToCompletion(
     if (isTerminalState(state)) return call;
 
     if (Date.now() >= deadline) {
+      // Note we emit "failed" for the DASHBOARD — the theatre cannot sit on a
+      // spinner forever — while the error we throw says the opposite: outcome
+      // unknown, call possibly live. The agent must not read this as "the call
+      // failed, ring the next contact". See mustNotAdvanceLadder in graph.ts.
       hooks.onState?.("failed", callId);
       throw new CallTimeoutError(callId, timeoutMs);
     }
@@ -285,9 +343,18 @@ export interface RetryOptions {
 }
 
 /**
- * Retries a CALL-E operation with exponential backoff (F10: 3 attempts, then
- * a human alert). A timeout is NOT retried — the call really did happen and
- * redialling would ring a technician twice.
+ * Retries a CALL-E operation with exponential backoff (3 attempts, then a
+ * human alert).
+ *
+ * A CallTimeoutError is never retried: the call is still live on CALL-E's side
+ * when we give up.
+ *
+ * OBSERVED TWICE (calls call_x2ENjL… on 2026-09-13 and call_pTAB-O4… on
+ * 2026-09-14): we abandoned the poll at our ceiling and recorded a failure —
+ * and CALL-E carried on and completed both, 40 and 44 turns, with valid
+ * results. Abandoning a call is not cancelling it, and there is no cancel API.
+ * A retry here dials the same supplier a second time while the first
+ * conversation is still in progress.
  */
 export async function withRetry<T>(
   operation: () => Promise<T>,

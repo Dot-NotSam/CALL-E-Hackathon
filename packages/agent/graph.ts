@@ -1,155 +1,206 @@
 /**
  * packages/agent/graph.ts
- * LangGraph escalation agent — main graph definition.
+ * LangGraph coordination agent — main graph definition.
  * Owner: Aryan
  *
- * Graph topology:
+ * Graph topology (PRD §10.1):
  *
- *   assess_incident
- *        │
- *   ┌────┴────┐
- * suppress   select_responder
- *   │              │
- *  END         plan_call
- *                  │
+ *   START
+ *     │  mode=COORDINATE          mode=VERIFY (a follow-up firing)
+ *     ▼                                    │
+ *   assess_order                           │
+ *        │                                 │
+ *   ┌────┴────┐                            │
+ * suppress   select_contact ◄────────┐     │
+ *   │              │                 │     │
+ *  END         plan_call ◄───────────┼─────┘
+ *                  │                 │
  *             execute_call ──► CALL-E SDK (real phone call)
- *                  │
- *               decide
- *         ┌───────┼──────────┬──────────────┐
- *       resolve  escalate  human_review  schedule_callback
- *         │        │                         │
- *        END  select_responder (loop)       END
- *               │
- *         [ladder exhausted] → unresolved → END
+ *                  │                 │
+ *               decide               │
+ *      ┌──────┬────┴────┬────────┬───┴───┐
+ *   confirm  approval  callback  human_  verify   (VERIFY runs only)
+ *      │        │        │      review     │
+ *     END      END      END      END    ┌──┴──┐
+ *                                     END   escalate
+ *                                             │
+ *                                   [cap] → unresolved → END
  *
- * Every node emits an SSE event and an agent_events row via callbacks.
+ * A follow-up (VERIFICATION or REMAINING_QUANTITY) is the SAME graph on the
+ * SAME order carrying the SAME trace_id. It enters at plan_call because the
+ * order was already assessed and the contact is the one who made the
+ * commitment — not whoever the ladder would pick today.
  *
- * State channels use Annotation.Root — each field is a last-value channel,
- * so a node's returned update replaces the previous value. Do NOT hand-roll
+ * Every node emits an SSE event and an agent_events row carrying the same
+ * trace_id (Rule 7).
+ *
+ * State channels use Annotation.Root — each field is a last-value channel, so a
+ * node's returned update replaces the previous value. Do NOT hand-roll
  * `{ value: (x) => x }` reducers: LangGraph invokes a channel reducer as
- * `reducer(current, incoming)`, so a single-argument identity silently
- * discards every update after the first.
+ * `reducer(current, incoming)`, so a single-argument identity silently discards
+ * every update after the first.
  */
 
 import { StateGraph, Annotation, START, END } from "@langchain/langgraph";
-import type { EscalationState } from "./state";
-import { lastStructuredResult, lastConfidence } from "./state";
-import { assessIncident, getSuppressReason } from "./nodes/assessIncident";
-import { selectBestResponder } from "./nodes/selectResponder";
-import { executeCall, type PersistCallFn } from "./nodes/executeCall";
+import type { CoordinationState, CoordinationMode } from "./state";
+import { lastStructuredResult, lastConfidence, toContext } from "./state";
+import {
+  assessOrder,
+  type DuplicateCandidate,
+} from "./nodes/assessOrder";
+import { selectBestContact, mayOverrideWorkingHours } from "./nodes/selectContact";
+import { executeCall, narrowResult, type PersistCallFn } from "./nodes/executeCall";
 import { decide, explainDecision } from "./nodes/decide";
 import { escalate } from "./nodes/escalate";
-import { resolve, type ResolveCallbacks } from "./nodes/resolve";
+import { confirm, type ConfirmCallbacks } from "./nodes/confirm";
+import { approval, type ApprovalCallbacks } from "./nodes/approval";
+import { scheduleCallback, type ScheduleCallbackCallbacks } from "./nodes/scheduleCallback";
+import { humanReview, type HumanReviewCallbacks } from "./nodes/humanReview";
 import { unresolved, type UnresolvedCallbacks } from "./nodes/unresolved";
 import { verify, type VerifyCallbacks } from "./nodes/verify";
-import { humanReview, type HumanReviewCallbacks } from "./nodes/humanReview";
-import { scheduleCallback, type ScheduleCallbackCallbacks } from "./nodes/scheduleCallback";
 import { buildCallPlanSummary, getMustAskQuestions } from "../calle/prompt";
 import type {
-  Responder,
-  Asset,
-  Reading,
-  Facility,
-  Severity,
+  Contact,
+  Organization,
+  OrderItem,
+  Trigger,
+  Urgency,
   CallRecord,
-  EscalationStructuredResult,
-  Outcome,
-  EscalationContext,
-  CallStatus,
+  CallState,
+  WholesaleResult,
+  OrderOutcome,
+  ApprovalRequest,
+  FollowUp,
+  Confidence,
+  FollowUpKind,
 } from "../types";
 
-// ─── State channels ───────────────────────────────────────────────────────────
-// One channel per EscalationState field. Bare `Annotation<T>` = last value wins.
+// ─── State channels ──────────────────────────────────────────────────────────
+// One channel per CoordinationState field. Bare `Annotation<T>` = last value wins.
 
-export const EscalationAnnotation = Annotation.Root({
-  incidentId: Annotation<string>,
+export const CoordinationAnnotation = Annotation.Root({
+  orderId: Annotation<string>,
   traceId: Annotation<string>,
-  severity: Annotation<Severity>,
-  safeWindowMinutes: Annotation<number>,
-  consequence: Annotation<string>,
-  asset: Annotation<Asset>,
-  reading: Annotation<Reading>,
-  facility: Annotation<Facility>,
-  escalationRung: Annotation<number>,
+  reference: Annotation<string>,
+  mode: Annotation<CoordinationMode>,
+  followUpKind: Annotation<FollowUpKind | null>,
+  followUpId: Annotation<string | null>,
+  urgency: Annotation<Urgency>,
+  requiredBy: Annotation<string>,
+  buyer: Annotation<Organization>,
+  seller: Annotation<Organization>,
+  item: Annotation<OrderItem>,
+  trigger: Annotation<Trigger>,
+  rung: Annotation<number>,
   maxRungs: Annotation<number>,
-  attemptedResponders: Annotation<string[]>,
-  currentResponder: Annotation<Responder | null>,
+  attemptedContacts: Annotation<string[]>,
+  currentContact: Annotation<Contact | null>,
   callHistory: Annotation<CallRecord[]>,
-  structuredResults: Annotation<EscalationStructuredResult[]>,
-  confidenceHistory: Annotation<{ score: number; label: string }[]>,
-  finalOutcome: Annotation<Outcome | null>,
+  structuredResults: Annotation<(WholesaleResult | null)[]>,
+  confidenceHistory: Annotation<Confidence[]>,
+  finalOutcome: Annotation<OrderOutcome | null>,
+  pendingApproval: Annotation<ApprovalRequest | null>,
+  followUps: Annotation<FollowUp[]>,
   requiresHumanReview: Annotation<boolean>,
   suppressReason: Annotation<string | null>,
+  duplicateOf: Annotation<string | null>,
   callError: Annotation<string | null>,
   ladderExhausted: Annotation<boolean>,
   route: Annotation<string | null>,
 });
 
-// Compile-time guard: the annotation and EscalationState must not drift.
-type AnnotationState = typeof EscalationAnnotation.State;
+// Compile-time guard: the annotation and CoordinationState must not drift.
+type AnnotationState = typeof CoordinationAnnotation.State;
 type AssertExtends<A extends B, B> = true;
-export type _StateMatchesAnnotation = AssertExtends<AnnotationState, EscalationState> &
-  AssertExtends<EscalationState, AnnotationState>;
+export type _StateMatchesAnnotation = AssertExtends<AnnotationState, CoordinationState> &
+  AssertExtends<CoordinationState, AnnotationState>;
 
 // ─── Graph dependencies (injected by Sameer's backend) ───────────────────────
-// The agent never touches the DB or SSE directly. All side effects
-// are callbacks — this keeps the graph pure and replayable.
+// The agent never touches the DB or SSE directly. All side effects are
+// callbacks — this keeps the graph pure and replayable.
 
 export interface AgentDependencies {
-  // Roster to select responders from
-  getRoster: (facilityId: string) => Promise<Responder[]>;
-  requiredSkill: string;
-  requiredZone: string;
+  /** Consented contacts for the seller on this order (FR-3.1). */
+  getContacts: (organizationId: string) => Promise<Contact[]>;
+  /** Other open requests, for duplicate suppression (FR-2.3). */
+  getOpenOrders?: (sellerId: string) => Promise<DuplicateCandidate[]>;
+  /** Product category this order needs cover for. */
+  requiredCategory?: string;
 
-  // Persistence (Sameer implements these)
+  // Persistence + side effects (Sameer implements these)
   persistCall: PersistCallFn;
-  resolveCallbacks: ResolveCallbacks;
-  unresolvedCallbacks: UnresolvedCallbacks;
-  verifyCallbacks: VerifyCallbacks;
-  humanReviewCallbacks: HumanReviewCallbacks;
+  confirmCallbacks: ConfirmCallbacks;
+  approvalCallbacks: ApprovalCallbacks;
   scheduleCallbackCallbacks: ScheduleCallbackCallbacks;
+  humanReviewCallbacks: HumanReviewCallbacks;
+  unresolvedCallbacks: UnresolvedCallbacks;
+  /** FR-5.4 — only needed if follow-up (VERIFY) runs are invoked. */
+  verifyCallbacks?: VerifyCallbacks;
 
-  // SSE emitters (Sameer implements these)
+  // ── SSE emitters (Sameer implements these) ──────────────────────────────
   emitAgentEvent: (params: {
-    incidentId: string;
+    orderId: string;
     node: string;
     decision: string;
     reason: string;
     traceId: string;
   }) => void;
-  emitSSEPlanComposed: (params: {
-    incidentId: string;
-    summary: string;
-    mustAsk: string[];
+
+  emitSSEOrderSuppressed: (params: {
+    orderId: string;
+    reason: string;
+    duplicateOf?: string;
   }) => void;
-  emitSSEResponderSelected: (params: {
-    incidentId: string;
-    responder: Responder;
+
+  emitSSEContactSelected: (params: {
+    orderId: string;
+    contact: Contact;
     rung: number;
   }) => void;
 
-  /** FR-5.2 — live call lifecycle, drives the Live Call Theatre visuals. */
+  emitSSEPlanComposed: (params: {
+    orderId: string;
+    summary: string;
+    mustAsk: string[];
+  }) => void;
+
+  /** FR-4.3 — live call lifecycle, drives the call theatre visuals. */
   emitSSECallState?: (params: {
-    incidentId: string;
+    orderId: string;
     callId: string;
-    state: CallStatus;
+    state: CallState;
+    ts: string;
     traceId: string;
   }) => void;
 
-  /** FR-5.2 — transcript turns as CALL-E reports them. */
+  /** FR-4.3 — transcript turns as CALL-E reports them. */
   emitSSETranscriptDelta?: (params: {
-    incidentId: string;
+    orderId: string;
     speaker: "AGENT" | "HUMAN";
     text: string;
     ts: string;
     traceId: string;
   }) => void;
 
-  // Incident opened timestamp — used to compute time_saved
-  incidentOpenedAt: Date;
+  /** FR-4.4 — the typed extraction, confidence and evidence. */
+  emitSSEResultExtracted?: (params: {
+    orderId: string;
+    structured: WholesaleResult;
+    confidence: Confidence;
+    evidence: string[];
+    traceId: string;
+  }) => void;
+
+  emitSSEOrderEscalated?: (params: {
+    orderId: string;
+    fromRung: number;
+    toRung: number;
+    reason: string;
+    traceId: string;
+  }) => void;
 
   /**
-   * FR-10.5 — the global kill switch. Checked immediately before every dial.
+   * FR-7.4 — the global kill switch. Checked immediately before every dial.
    *
    * If this is not supplied the agent FAILS CLOSED and refuses to call: a
    * missing kill switch is a broken kill switch, and SAFETY.md promises this
@@ -158,107 +209,126 @@ export interface AgentDependencies {
   isKillSwitchActive?: () => Promise<boolean>;
 
   /**
-   * FR-7.3 — hard ceiling on total calls per incident, independent of the rung
+   * FR-7.4 — hard ceiling on total calls per order, independent of the rung
    * cap. Enforced in code so no prompt or model output can raise it.
    */
-  maxCallsPerIncident?: number;
+  maxCallsPerOrder?: number;
 
-  /** FR-5.4 — hard ceiling on any single call's duration. */
+  /** Hard ceiling on any single call's duration. */
   callTimeoutMs?: number;
 
-  // Use mock CALL-E? (dev only)
+  /**
+   * FR-7.3 — whether this facility permits an URGENT order to call outside a
+   * contact's working hours. Defaults to false.
+   */
+  allowUrgentOutsideWorkingHours?: boolean;
+
+  /** Use the mock CALL-E driver? (dev only) */
   useMock?: boolean;
 }
 
-/** PRD §4.1 — default max 5 calls per incident. */
-export const DEFAULT_MAX_CALLS_PER_INCIDENT = 5;
+/** PRD §7.4 / FR-7.4 — default ceiling on calls per order. */
+export const DEFAULT_MAX_CALLS_PER_ORDER = 5;
 
-/** Builds the EscalationContext the prompt + call layers consume. */
-function toContext(state: EscalationState, responder: Responder): EscalationContext {
-  return {
-    incidentId: state.incidentId,
-    traceId: state.traceId,
-    severity: state.severity,
-    safeWindowMinutes: state.safeWindowMinutes,
-    consequence: state.consequence,
-    escalationRung: state.escalationRung,
-    facility: state.facility,
-    asset: state.asset,
-    reading: state.reading,
-    responder,
-  };
-}
+// ─── Build the graph ─────────────────────────────────────────────────────────
 
-// ─── Build the graph ──────────────────────────────────────────────────────────
+export function buildCoordinationGraph(deps: AgentDependencies) {
+  const graph = new StateGraph(CoordinationAnnotation)
 
-export function buildEscalationGraph(deps: AgentDependencies) {
-  const graph = new StateGraph(EscalationAnnotation)
+    // ── Node: assess_order ───────────────────────────────────────────────────
+    .addNode("assess_order", async (state) => {
+      const existingOrders = deps.getOpenOrders
+        ? await deps.getOpenOrders(state.seller.id)
+        : [];
 
-    // ── Node: assess_incident ────────────────────────────────────────────────
-    .addNode("assess_incident", async (state) => {
-      const route = assessIncident(state);
-      const suppressReason = route === "suppress" ? getSuppressReason(state) : null;
+      const outcome = assessOrder(state, { existingOrders });
 
-      deps.emitAgentEvent({
-        incidentId: state.incidentId,
-        node: "assess_incident",
-        decision: route,
-        reason: suppressReason ?? "Incident assessed as call-worthy.",
-        traceId: state.traceId,
-      });
-
-      return { suppressReason, route };
-    })
-
-    // ── Node: select_responder ───────────────────────────────────────────────
-    .addNode("select_responder", async (state) => {
-      const roster = await deps.getRoster(state.facility.id);
-      const responder = selectBestResponder(
-        state,
-        roster,
-        deps.requiredSkill,
-        deps.requiredZone
-      );
-
-      if (responder) {
-        deps.emitSSEResponderSelected({
-          incidentId: state.incidentId,
-          responder,
-          rung: state.escalationRung,
+      if (outcome.route === "suppress") {
+        deps.emitSSEOrderSuppressed({
+          orderId: state.orderId,
+          reason: outcome.reason,
+          ...(outcome.duplicateOf ? { duplicateOf: outcome.duplicateOf } : {}),
         });
       }
 
       deps.emitAgentEvent({
-        incidentId: state.incidentId,
-        node: "select_responder",
-        decision: responder ? "responder_found" : "no_responder",
-        reason: responder
-          ? `Selected ${responder.name} (${responder.role}) — rung ${state.escalationRung}`
-          : `No eligible responder for skill=${deps.requiredSkill}, zone=${deps.requiredZone}`,
+        orderId: state.orderId,
+        node: "assess_order",
+        decision: outcome.route,
+        reason: outcome.reason,
         traceId: state.traceId,
       });
 
       return {
-        currentResponder: responder ?? null,
-        route: responder ? "plan_call" : "unresolved",
+        suppressReason: outcome.route === "suppress" ? outcome.reason : null,
+        duplicateOf: outcome.duplicateOf,
+        // Urgency is recomputed here: a callback can fire hours after the
+        // order opened, and the prompt must frame the call on current time.
+        urgency: outcome.urgency,
+        route: outcome.route,
+      };
+    })
+
+    // ── Node: select_contact ─────────────────────────────────────────────────
+    .addNode("select_contact", async (state) => {
+      const roster = await deps.getContacts(state.seller.id);
+
+      const { contact, rejections } = selectBestContact(state, roster, {
+        requiredCategory: deps.requiredCategory,
+        allowOutsideWorkingHours: mayOverrideWorkingHours(
+          state.urgency,
+          deps.allowUrgentOutsideWorkingHours ?? false
+        ),
+      });
+
+      if (contact) {
+        deps.emitSSEContactSelected({
+          orderId: state.orderId,
+          contact,
+          rung: state.rung,
+        });
+      }
+
+      deps.emitAgentEvent({
+        orderId: state.orderId,
+        node: "select_contact",
+        decision: contact ? "contact_found" : "no_contact",
+        reason: contact
+          ? `Selected ${contact.name} (${contact.role}) at ${state.seller.name} — rung ${state.rung}.`
+          : `No eligible contact at ${state.seller.name}. ` +
+            (rejections.length
+              ? rejections.map((r) => `${r.name}: ${r.reason}`).join(" ")
+              : "The roster is empty."),
+        traceId: state.traceId,
+      });
+
+      return {
+        currentContact: contact,
+        route: contact ? "plan_call" : "unresolved",
       };
     })
 
     // ── Node: plan_call ──────────────────────────────────────────────────────
     .addNode("plan_call", async (state) => {
-      // Guaranteed non-null: select_responder routes here only when set.
-      const ctx = toContext(state, state.currentResponder!);
-      const summary = buildCallPlanSummary(ctx);
-      const mustAsk = getMustAskQuestions(ctx);
+      // Guaranteed non-null: select_contact routes here only when set, and a
+      // VERIFY run is created with the contact who made the commitment.
+      const contact = state.currentContact!;
+      const ctx = toContext(state);
 
-      deps.emitSSEPlanComposed({
-        incidentId: state.incidentId,
-        summary,
-        mustAsk,
-      });
+      const isFollowUp = state.mode === "VERIFY";
+
+      const summary = isFollowUp
+        ? followUpPlanSummary(state, contact)
+        : buildCallPlanSummary(ctx, contact);
+
+      const mustAsk = isFollowUp
+        ? followUpMustAsk(state)
+        : getMustAskQuestions(ctx);
+
+      deps.emitSSEPlanComposed({ orderId: state.orderId, summary, mustAsk });
 
       deps.emitAgentEvent({
-        incidentId: state.incidentId,
+        orderId: state.orderId,
         node: "plan_call",
         decision: "plan_ready",
         reason: summary,
@@ -270,7 +340,7 @@ export function buildEscalationGraph(deps: AgentDependencies) {
 
     // ── Node: execute_call ───────────────────────────────────────────────────
     .addNode("execute_call", async (state) => {
-      // ── FR-10.5 — kill switch. Nothing dials past this point. ──────────────
+      // ── FR-7.4 — kill switch. Nothing dials past this point. ──────────────
       // Fails closed: if the check itself errors, or was never wired up, we
       // treat the switch as ACTIVE. A safety control that silently degrades to
       // "allow" is not a safety control.
@@ -291,7 +361,7 @@ export function buildEscalationGraph(deps: AgentDependencies) {
           : "No kill switch check was wired into the agent — refusing to dial (fail-closed).";
 
         deps.emitAgentEvent({
-          incidentId: state.incidentId,
+          orderId: state.orderId,
           node: "execute_call",
           decision: "kill_switch_active",
           reason,
@@ -301,16 +371,16 @@ export function buildEscalationGraph(deps: AgentDependencies) {
         return { callError: reason };
       }
 
-      // FR-7.3 — call cap, enforced before dialling. This is separate from the
-      // rung cap: callbacks and retries can burn calls without advancing a rung.
-      const maxCalls = deps.maxCallsPerIncident ?? DEFAULT_MAX_CALLS_PER_INCIDENT;
+      // FR-7.4 — call cap, enforced before dialling. Separate from the rung
+      // cap: callbacks and retries burn calls without advancing a rung.
+      const maxCalls = deps.maxCallsPerOrder ?? DEFAULT_MAX_CALLS_PER_ORDER;
       if (state.callHistory.length >= maxCalls) {
         const reason =
-          `Call cap reached (${state.callHistory.length}/${maxCalls}) for incident ` +
-          `${state.incidentId} — refusing to dial again.`;
+          `Call cap reached (${state.callHistory.length}/${maxCalls}) for order ` +
+          `${state.reference} — refusing to dial again.`;
 
         deps.emitAgentEvent({
-          incidentId: state.incidentId,
+          orderId: state.orderId,
           node: "execute_call",
           decision: "call_cap_reached",
           reason,
@@ -320,6 +390,8 @@ export function buildEscalationGraph(deps: AgentDependencies) {
         return { callError: reason };
       }
 
+      const startedAt = new Date().toISOString();
+
       try {
         const { callId, result } = await executeCall(state, deps.persistCall, {
           useMock: deps.useMock,
@@ -327,14 +399,15 @@ export function buildEscalationGraph(deps: AgentDependencies) {
           hooks: {
             onState: (callState, calleCallId) =>
               deps.emitSSECallState?.({
-                incidentId: state.incidentId,
+                orderId: state.orderId,
                 callId: calleCallId,
                 state: callState,
+                ts: new Date().toISOString(),
                 traceId: state.traceId,
               }),
-            onTranscript: (turn, _calleCallId) =>
+            onTranscript: (turn) =>
               deps.emitSSETranscriptDelta?.({
-                incidentId: state.incidentId,
+                orderId: state.orderId,
                 speaker: turn.speaker,
                 text: turn.text,
                 ts: new Date().toISOString(),
@@ -343,41 +416,54 @@ export function buildEscalationGraph(deps: AgentDependencies) {
           },
         });
 
-        const structuredResult =
-          (result.structuredResult as EscalationStructuredResult | null) ?? null;
+        const structuredResult = narrowResult(result.structuredResult);
         const confidence = result.completionConfidence ?? { score: 0, label: "none" };
 
+        if (structuredResult) {
+          deps.emitSSEResultExtracted?.({
+            orderId: state.orderId,
+            structured: structuredResult,
+            confidence,
+            evidence: result.evidence,
+            traceId: state.traceId,
+          });
+        }
+
         deps.emitAgentEvent({
-          incidentId: state.incidentId,
+          orderId: state.orderId,
           node: "execute_call",
           decision: result.status,
-          reason: `taskCompleted=${result.taskCompleted}, confidence=${confidence.score}`,
+          reason:
+            `taskCompleted=${result.taskCompleted}, confidence=${confidence.score}` +
+            (structuredResult ? `, next_action=${structuredResult.next_action}` : ", no usable result"),
           traceId: state.traceId,
         });
 
-        const startedAt = new Date().toISOString();
+        const endedAt = new Date().toISOString();
 
         return {
-          structuredResults: structuredResult
-            ? [...state.structuredResults, structuredResult]
-            : state.structuredResults,
+          // Appended unconditionally, null included, so index N of this array,
+          // confidenceHistory and callHistory always describe the same call.
+          structuredResults: [...state.structuredResults, structuredResult],
           confidenceHistory: [...state.confidenceHistory, confidence],
           callHistory: [
             ...state.callHistory,
             {
               callId,
-              incidentId: state.incidentId,
-              responderId: state.currentResponder!.id,
-              escalationRung: state.escalationRung,
-              status: result.status as CallStatus,
+              orderId: state.orderId,
+              contactId: state.currentContact!.id,
+              rung: state.rung,
+              state: result.status as CallState,
               taskCompleted: result.taskCompleted ?? false,
               confidenceScore: confidence.score,
               confidenceLabel: confidence.label,
               evidence: result.evidence,
               structuredResult,
               startedAt,
-              endedAt: startedAt,
-              durationSeconds: null,
+              endedAt,
+              durationSeconds: Math.round(
+                (new Date(endedAt).getTime() - new Date(startedAt).getTime()) / 1000
+              ),
               traceId: state.traceId,
             },
           ],
@@ -387,7 +473,7 @@ export function buildEscalationGraph(deps: AgentDependencies) {
         const errorMsg = err instanceof Error ? err.message : String(err);
 
         deps.emitAgentEvent({
-          incidentId: state.incidentId,
+          orderId: state.orderId,
           node: "execute_call",
           decision: "call_error",
           reason: errorMsg,
@@ -400,23 +486,51 @@ export function buildEscalationGraph(deps: AgentDependencies) {
 
     // ── Node: decide ─────────────────────────────────────────────────────────
     .addNode("decide", async (state) => {
-      // If execute_call failed outright, route to human review (F10).
+      // A call we have no result for cannot produce a commitment. The kill
+      // switch, the call cap, a poll timeout and an SDK failure all land here.
+      //
+      // Where it routes depends on WHY. A kill switch or cap is a deliberate
+      // stop, and a timeout is an unknown outcome with a possibly-live call on
+      // the line — neither may advance the ladder. An SDK error is a failure of
+      // ours, and the ladder should advance (PRD §9 "call drops → retry, then
+      // escalate"; withRetry has already exhausted its attempts by here).
       if (state.callError) {
+        const route = mustNotAdvanceLadder(state.callError)
+          ? "unresolved"
+          : "escalate";
+
         deps.emitAgentEvent({
-          incidentId: state.incidentId,
+          orderId: state.orderId,
           node: "decide",
-          decision: "human_review",
-          reason: `Call error: ${state.callError}`,
+          decision: route,
+          reason: `Call did not complete: ${state.callError}`,
           traceId: state.traceId,
         });
-        return { requiresHumanReview: true, route: "human_review" };
+
+        return { route };
+      }
+
+      // A follow-up asks a different question — "did it actually dispatch?" —
+      // so it is judged by the verify node, not the coordination decision
+      // table. Routing it through `decide` would read a status check as a
+      // fresh commitment and re-confirm an order that never shipped.
+      if (state.mode === "VERIFY") {
+        deps.emitAgentEvent({
+          orderId: state.orderId,
+          node: "decide",
+          decision: "verify",
+          reason: "Follow-up call — routing to verification.",
+          traceId: state.traceId,
+        });
+
+        return { route: "verify" };
       }
 
       const decision = decide(state);
       const reason = explainDecision(state, decision);
 
       deps.emitAgentEvent({
-        incidentId: state.incidentId,
+        orderId: state.orderId,
         node: "decide",
         decision,
         reason,
@@ -429,51 +543,119 @@ export function buildEscalationGraph(deps: AgentDependencies) {
       };
     })
 
-    // ── Node: escalate ───────────────────────────────────────────────────────
-    .addNode("escalate", async (state) => {
-      const { nextNode, updatedState } = escalate(state);
-      const exhausted = nextNode === "unresolved";
+    // ── Node: verify ─────────────────────────────────────────────────────────
+    // FR-5.4 — did the commitment actually hold? Only reached on a VERIFY run.
+    .addNode("verify", async (state) => {
+      if (!deps.verifyCallbacks) {
+        const reason =
+          "A follow-up run was invoked without verifyCallbacks wired — cannot " +
+          "record the verification outcome.";
+
+        deps.emitAgentEvent({
+          orderId: state.orderId,
+          node: "verify",
+          decision: "not_wired",
+          reason,
+          traceId: state.traceId,
+        });
+
+        return { route: "human_review", callError: reason };
+      }
+
+      const { route, updates, reason } = await verify(state, deps.verifyCallbacks, {
+        followUpId: state.followUpId ?? undefined,
+      });
 
       deps.emitAgentEvent({
-        incidentId: state.incidentId,
+        orderId: state.orderId,
+        node: "verify",
+        decision: route === "confirm" ? "commitment_held" : "commitment_missed",
+        reason,
+        traceId: state.traceId,
+      });
+
+      // `verify` already wrote the order on the paths where it had something to
+      // say, so a held commitment ends the run rather than re-entering confirm.
+      //
+      // Escalating LEAVES VERIFY MODE. The ladder is about to pick a different
+      // contact, and the follow-up prompt opens with "you confirmed 120 cases
+      // previously" — said to someone who confirmed nothing, it is simply
+      // false, and `decide` would route their answer straight back into
+      // `verify` for a commitment they never made. A missed commitment
+      // escalated to a new person is a fresh coordination call.
+      if (route === "escalate") {
+        return { ...updates, mode: "COORDINATE" as const, route: "escalate" };
+      }
+
+      return { ...updates, route: "done" };
+    })
+
+    // ── Node: escalate ───────────────────────────────────────────────────────
+    .addNode("escalate", async (state) => {
+      const { nextNode, updatedState, reason } = escalate(state);
+      const exhausted = nextNode === "unresolved";
+
+      if (!exhausted) {
+        deps.emitSSEOrderEscalated?.({
+          orderId: state.orderId,
+          fromRung: state.rung,
+          toRung: state.rung + 1,
+          reason,
+          traceId: state.traceId,
+        });
+      }
+
+      deps.emitAgentEvent({
+        orderId: state.orderId,
         node: "escalate",
-        decision: exhausted
-          ? "ladder_exhausted"
-          : `rung_${state.escalationRung}_to_${state.escalationRung + 1}`,
-        reason: exhausted
-          ? `Rung cap reached (${state.escalationRung}/${state.maxRungs}) — routing to unresolved.`
-          : `Advancing from rung ${state.escalationRung} to ${state.escalationRung + 1}`,
+        decision: exhausted ? "ladder_exhausted" : `rung_${state.rung}_to_${state.rung + 1}`,
+        reason,
         traceId: state.traceId,
       });
 
       return { ...updatedState, ladderExhausted: exhausted, route: nextNode };
     })
 
-    // ── Node: resolve ────────────────────────────────────────────────────────
-    .addNode("resolve", async (state) => {
-      const updates = await resolve(state, deps.incidentOpenedAt, deps.resolveCallbacks);
+    // ── Node: confirm (full and partial) ─────────────────────────────────────
+    .addNode("confirm", async (state) => {
+      const updates = await confirm(state, deps.confirmCallbacks);
 
       deps.emitAgentEvent({
-        incidentId: state.incidentId,
-        node: "resolve",
-        decision: "resolved",
-        reason: `Incident resolved. ETA: ${lastStructuredResult(state)?.eta_minutes ?? "N/A"}min. Time saved: ${updates.finalOutcome?.timeSavedMinutes ?? 0}min.`,
+        orderId: state.orderId,
+        node: "confirm",
+        decision: updates.finalOutcome?.status ?? "confirmed",
+        reason: updates.finalOutcome?.summary ?? "Order updated.",
         traceId: state.traceId,
       });
 
       return updates;
     })
 
-    // ── Node: verify ─────────────────────────────────────────────────────────
-    .addNode("verify", async (state) => {
-      const updates = await verify(state, deps.verifyCallbacks);
-      const result = lastStructuredResult(state);
+    // ── Node: approval ───────────────────────────────────────────────────────
+    .addNode("approval", async (state) => {
+      const updates = await approval(state, deps.approvalCallbacks);
 
       deps.emitAgentEvent({
-        incidentId: state.incidentId,
-        node: "verify",
-        decision: "verification_scheduled",
-        reason: `Verification call scheduled at T+${(result?.eta_minutes ?? 60) + 5}min.`,
+        orderId: state.orderId,
+        node: "approval",
+        decision: "approval_required",
+        reason: updates.pendingApproval?.reason ?? "A commercial change needs a person.",
+        traceId: state.traceId,
+      });
+
+      return updates;
+    })
+
+    // ── Node: schedule_callback ──────────────────────────────────────────────
+    .addNode("schedule_callback", async (state) => {
+      const updates = await scheduleCallback(state, deps.scheduleCallbackCallbacks);
+      const followUp = updates.followUps?.[updates.followUps.length - 1];
+
+      deps.emitAgentEvent({
+        orderId: state.orderId,
+        node: "schedule_callback",
+        decision: "callback_scheduled",
+        reason: `Callback scheduled for ${followUp?.dueAt ?? "the requested time"}.`,
         traceId: state.traceId,
       });
 
@@ -485,26 +667,12 @@ export function buildEscalationGraph(deps: AgentDependencies) {
       const updates = await humanReview(state, deps.humanReviewCallbacks);
 
       deps.emitAgentEvent({
-        incidentId: state.incidentId,
+        orderId: state.orderId,
         node: "human_review",
         decision: "parked",
-        reason: `Parked for operator review. Confidence: ${lastConfidence(state)?.score ?? "N/A"}`,
-        traceId: state.traceId,
-      });
-
-      return updates;
-    })
-
-    // ── Node: schedule_callback ──────────────────────────────────────────────
-    .addNode("schedule_callback", async (state) => {
-      const updates = await scheduleCallback(state, deps.scheduleCallbackCallbacks);
-      const result = lastStructuredResult(state);
-
-      deps.emitAgentEvent({
-        incidentId: state.incidentId,
-        node: "schedule_callback",
-        decision: "callback_scheduled",
-        reason: `Callback scheduled at ${result?.callback_requested_at ?? "requested time"}`,
+        reason:
+          updates.finalOutcome?.summary ??
+          `Parked for operator review. Confidence: ${lastConfidence(state)?.score ?? "N/A"}.`,
         traceId: state.traceId,
       });
 
@@ -516,10 +684,10 @@ export function buildEscalationGraph(deps: AgentDependencies) {
       const updates = await unresolved(state, deps.unresolvedCallbacks);
 
       deps.emitAgentEvent({
-        incidentId: state.incidentId,
+        orderId: state.orderId,
         node: "unresolved",
         decision: "unresolved",
-        reason: `Ladder exhausted after ${state.escalationRung} rung(s).`,
+        reason: updates.finalOutcome?.summary ?? "Order unresolved.",
         traceId: state.traceId,
       });
 
@@ -530,17 +698,24 @@ export function buildEscalationGraph(deps: AgentDependencies) {
     // Each edge reads `state.route`, written by the node that just ran, so the
     // branch taken is always the same value emitted to the audit log.
 
-    .addEdge(START, "assess_incident")
-
+    // A follow-up run skips assessment and contact selection entirely: the
+    // order was already assessed, and this call goes to the person who made
+    // the commitment rather than to whoever the ladder would pick today.
     .addConditionalEdges(
-      "assess_incident",
-      (state) => (state.route === "suppress" ? "suppress" : "select_responder"),
-      { suppress: END, select_responder: "select_responder" }
+      START,
+      (state) => (state.mode === "VERIFY" ? "plan_call" : "assess_order"),
+      { plan_call: "plan_call", assess_order: "assess_order" }
     )
 
     .addConditionalEdges(
-      "select_responder",
-      (state) => (state.currentResponder ? "plan_call" : "unresolved"),
+      "assess_order",
+      (state) => (state.route === "suppress" ? "suppress" : "select_contact"),
+      { suppress: END, select_contact: "select_contact" }
+    )
+
+    .addConditionalEdges(
+      "select_contact",
+      (state) => (state.currentContact ? "plan_call" : "unresolved"),
       { plan_call: "plan_call", unresolved: "unresolved" }
     )
 
@@ -551,28 +726,134 @@ export function buildEscalationGraph(deps: AgentDependencies) {
       "decide",
       (state) => state.route ?? "human_review",
       {
-        resolve: "resolve",
+        // CONFIRM_ORDER and PARTIAL_CONFIRMATION share the confirm node — it
+        // reads the quantities and picks the status. `decide` still returns
+        // them separately so the audit trail distinguishes the two.
+        confirm: "confirm",
+        partial: "confirm",
+        approval: "approval",
         escalate: "escalate",
-        human_review: "human_review",
         schedule_callback: "schedule_callback",
+        human_review: "human_review",
+        unresolved: "unresolved",
+        // Only reachable on a VERIFY run.
         verify: "verify",
       }
     )
 
-    // The rung cap is decided inside escalate() and carried on ladderExhausted.
-    // Never re-derive it from escalationRung here: after a successful advance
-    // the rung already equals the value the next call should use.
+    // `verify` writes the order itself on both non-escalating paths, so a held
+    // commitment simply ends. A missed one re-enters the ladder.
     .addConditionalEdges(
-      "escalate",
-      (state) => (state.ladderExhausted ? "unresolved" : "select_responder"),
-      { select_responder: "select_responder", unresolved: "unresolved" }
+      "verify",
+      (state) => {
+        if (state.route === "escalate") return "escalate";
+        // Reached only when verifyCallbacks was never wired — the run cannot
+        // record its own outcome, so a person has to.
+        if (state.route === "human_review") return "human_review";
+        return "done";
+      },
+      { escalate: "escalate", human_review: "human_review", done: END }
     )
 
-    .addEdge("resolve", END)
-    .addEdge("verify", END)
-    .addEdge("human_review", END)
+    // The rung cap is decided inside escalate() and carried on ladderExhausted.
+    // Never re-derive it from `rung` here: after a successful advance the rung
+    // already equals the value the next call should use.
+    .addConditionalEdges(
+      "escalate",
+      (state) => (state.ladderExhausted ? "unresolved" : "select_contact"),
+      { select_contact: "select_contact", unresolved: "unresolved" }
+    )
+
+    .addEdge("confirm", END)
+    .addEdge("approval", END)
     .addEdge("schedule_callback", END)
+    .addEdge("human_review", END)
     .addEdge("unresolved", END);
 
   return graph.compile();
 }
+
+/**
+ * The operator-facing plan line for a follow-up call (FR-4.1).
+ *
+ * Kept separate from `buildCallPlanSummary` because a follow-up is a different
+ * promise: the coordination plan says "we are going to ask for 200 cases", and
+ * this one says "we are going to check the 120 they already promised".
+ */
+function followUpPlanSummary(state: CoordinationState, contact: Contact): string {
+  const { item, reference } = state;
+
+  if (state.followUpKind === "REMAINING_QUANTITY") {
+    return (
+      `Follow-up: chase ${contact.name} at ${state.seller.name} for the ` +
+      `${item.remainingQuantity ?? "outstanding"} ${item.unit} still owed on ${reference}`
+    );
+  }
+
+  return (
+    `Follow-up: verify ${contact.name} at ${state.seller.name} dispatched ` +
+    `${item.confirmedQuantity ?? item.requestedQuantity} ${item.unit} against ${reference}`
+  );
+}
+
+function followUpMustAsk(state: CoordinationState): string[] {
+  const { item } = state;
+
+  if (state.followUpKind === "REMAINING_QUANTITY") {
+    return [
+      `Are the remaining ${item.remainingQuantity ?? ""} ${item.unit} available now?`.replace(
+        /\s+/g,
+        " "
+      ),
+      `When will they dispatch?`,
+    ];
+  }
+
+  return [`Has the order dispatched?`, `Can you confirm the quantity that went out?`];
+}
+
+/**
+ * Must this failure stop here rather than ring the next contact?
+ *
+ * Two different reasons land in the same place:
+ *
+ * 1. A DELIBERATE STOP — kill switch or call cap. A person already decided;
+ *    escalating past it to ring the next contact would be a bypass.
+ *
+ * 2. AN UNKNOWN OUTCOME — a poll timeout. We stopped watching; the call did
+ *    not stop. OBSERVED twice (2026-09-13, 2026-09-14): CALL-E completed both
+ *    abandoned calls with valid results, and exposes no cancel API. So at the
+ *    moment we would escalate, a supplier may be mid-sentence agreeing to the
+ *    order — and rung 2 would ring a second person about it. An unknown
+ *    outcome is not a failed call, and the only safe move is to hand it to a
+ *    human, who can look the call up by id.
+ *
+ * 3. AN ACCOUNT-LEVEL FAILURE — no balance. Nothing about the next contact is
+ *    different; the account is out of money for all of them. OBSERVED
+ *    2026-09-14: the agent escalated on "Insufficient CALL-E balance" and, on
+ *    a three-rung ladder, would have retried the same dead account three times
+ *    and then reported "escalation exhausted after 3 contacts" — which reads
+ *    as a supplier problem and is not one. Escalation is for when a DIFFERENT
+ *    HUMAN might answer differently.
+ *
+ * Matched on the reasons `execute_call` and CallTimeoutError write, plus the
+ * SDK's own balance message. String matching on a vendor message is brittle;
+ * the cost of a miss is the old behaviour, which is why it is a substring and
+ * not an exact compare.
+ */
+function mustNotAdvanceLadder(callError: string): boolean {
+  const reason = callError.toLowerCase();
+
+  return (
+    reason.includes("kill switch") ||
+    reason.includes("call cap reached") ||
+    reason.includes("fail-closed") ||
+    reason.includes("may still be live") ||
+    reason.includes("balance") ||
+    reason.includes("quota") ||
+    reason.includes("insufficient")
+  );
+}
+
+/** Re-exported for tests and the backend's own audit rendering. */
+export { lastStructuredResult, lastConfidence };

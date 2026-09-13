@@ -3,48 +3,79 @@
  * Node: unresolved
  * Owner: Aryan
  *
- * Ladder exhausted — no responder committed after maxRungs attempts.
- * Raises a loud human alert. Exits to: END.
+ * The ladder is exhausted — no contact at this supplier produced a commitment.
+ * Raises a loud alert and closes the run. Exits to: END.
  *
- * This is the worst-case terminal state. The facility manager
- * must be alerted immediately regardless of quiet hours (CRITICAL override).
+ * This is the worst-case terminal state, and it must be LOUD. An order that
+ * quietly ends UNRESOLVED is worse than one that was never raised: the buyer
+ * believes coordination is in hand when nothing is.
  */
 
-import type { EscalationState } from "../state";
-import type { Outcome } from "../../types";
+import type { CoordinationState } from "../state";
+import type { OrderOutcome } from "../../types";
 
-export type UnresolvedCallbacks = {
-  persistOutcome: (outcome: Outcome) => Promise<void>;
-  alertFacilityManager: (incidentId: string, reason: string) => Promise<void>;
-  emitSSE: (incidentId: string, reason: string) => void;
-};
+export interface UnresolvedCallbacks {
+  /** Emits `order.unresolved` and `order.updated`. */
+  updateOrder: (outcome: OrderOutcome) => Promise<void>;
+  /** The loud part. Must reach a person, not a dashboard panel. */
+  alertOperations: (params: {
+    orderId: string;
+    reference: string;
+    traceId: string;
+    reason: string;
+  }) => Promise<void>;
+}
 
 export async function unresolved(
-  state: EscalationState,
+  state: CoordinationState,
   callbacks: UnresolvedCallbacks
-): Promise<Partial<EscalationState>> {
-  const reason =
-    `Escalation ladder exhausted after ${state.escalationRung} rung(s). ` +
-    `Attempted responders: ${state.attemptedResponders.join(", ") || "none"}.`;
+): Promise<Partial<CoordinationState>> {
+  const reason = buildReason(state);
 
-  const outcome: Outcome = {
-    incidentId: state.incidentId,
-    responderId: null,
+  const outcome: OrderOutcome = {
+    orderId: state.orderId,
+    contactId: null,
+    status: "UNRESOLVED",
     committed: false,
-    etaMinutes: null,
-    verifiedAt: null,
-    verificationResult: null,
-    notifiedAt: null,
-    timeSavedMinutes: null,
+    confirmedQuantity: null,
+    remainingQuantity: null,
+    unitPrice: null,
+    dispatchDate: null,
+    deliveryEta: null,
+    summary: reason,
+    operatorMinutesSaved: null,
   };
 
-  await callbacks.persistOutcome(outcome);
+  await callbacks.updateOrder(outcome);
+  await callbacks.alertOperations({
+    orderId: state.orderId,
+    reference: state.reference,
+    traceId: state.traceId,
+    reason,
+  });
 
-  // Alert must fire even during quiet hours — this is UNRESOLVED
-  await callbacks.alertFacilityManager(state.incidentId, reason);
-  callbacks.emitSSE(state.incidentId, reason);
+  return { finalOutcome: outcome };
+}
 
-  return {
-    finalOutcome: outcome,
-  };
+function buildReason(state: CoordinationState): string {
+  const attempted = state.attemptedContacts.length;
+
+  // The kill switch and the call cap both land here without the ladder
+  // actually being walked, so the message must not claim contacts were tried
+  // when they were not.
+  if (attempted === 0) {
+    return (
+      `No contact at ${state.seller.name} could be called for order ${state.reference}` +
+      (state.callError ? `: ${state.callError}` : ".") +
+      ` ${state.item.requestedQuantity} ${state.item.unit} of ${state.item.description} ` +
+      "remain unconfirmed."
+    );
+  }
+
+  return (
+    `Escalation exhausted after ${attempted} contact${attempted === 1 ? "" : "s"} at ` +
+    `${state.seller.name} (rung ${state.rung} of ${state.maxRungs}). ` +
+    `${state.item.requestedQuantity} ${state.item.unit} of ${state.item.description} ` +
+    `for order ${state.reference} remain unconfirmed — a person must take this over.`
+  );
 }
