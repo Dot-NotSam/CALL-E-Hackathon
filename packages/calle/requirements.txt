@@ -1,0 +1,7 @@
+# Python 3.10-3.12 only. Kokoro does not support Python 3.13 yet.
+kokoro>=0.9.4
+numpy>=1.26
+soundfile>=0.13
+# Optional language packs:
+# misaki[ja]
+# misaki[zh]
