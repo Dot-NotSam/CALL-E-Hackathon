@@ -68,3 +68,5 @@ export function __setCalleClientForTesting(client: CalleClientType | null): void
 
 // Re-export types we use from the SDK
 export type { Call, CreateCallInput } from "@call-e/calle";
+export { synthesizeSpeech } from "./voice";
+export type { SpeechAudio, SpeechOptions } from "./voice";

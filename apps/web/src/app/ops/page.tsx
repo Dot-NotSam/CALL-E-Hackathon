@@ -1,7 +1,7 @@
-import { OrdersBoard } from "@/components/ops/OrdersBoard";
+import { WholesalerDashboard } from "@/components/ops/WholesalerDashboard";
 
-export const metadata = { title: "Orders — Sentinel Ops" };
+export const metadata = { title: "Wholesaler Dashboard — Sentinel Ops" };
 
 export default function OpsPage() {
-  return <OrdersBoard />;
+  return <WholesalerDashboard />;
 }

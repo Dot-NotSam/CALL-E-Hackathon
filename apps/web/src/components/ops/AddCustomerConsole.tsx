@@ -23,6 +23,8 @@ import { Panel } from "@/components/ui/Panel";
 import { Button } from "@/components/ui/Button";
 import { apiPost } from "@/lib/api";
 
+import { useAuth } from "@/lib/auth/auth-context";
+
 const VendorFormSchema = z.object({
   name: z.string().trim().min(2, "Full name is required (at least 2 characters)"),
   mobileNo: z
@@ -91,6 +93,7 @@ const INPUT =
   "placeholder:text-ink-faint focus:border-lilac focus:outline-none aria-[invalid=true]:border-state-critical";
 
 export function AddCustomerConsole() {
+  const { profile } = useAuth();
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
 
@@ -119,13 +122,21 @@ export function AddCustomerConsole() {
     setSubmitting(true);
     setError(null);
 
+    const activeOrgId = profile?.id || profile?.organizationId || "org-northgate";
+
     apiPost<{ success: boolean; contact: Contact }>("/api/v1/contacts", {
       ...parsed.data,
       role: "Vendor",
+      organizationId: activeOrgId,
     })
       .then((res) => {
-        setLastAdded(res.contact);
+        const contactWithOrg = { ...res.contact, organizationId: activeOrgId };
+        setLastAdded(contactWithOrg);
         setForm(INITIAL_FORM);
+        try {
+          const existing = JSON.parse(localStorage.getItem("sentinel_added_contacts") || "[]");
+          localStorage.setItem("sentinel_added_contacts", JSON.stringify([contactWithOrg, ...existing]));
+        } catch {}
       })
       .catch((err: unknown) => {
         setError(err instanceof Error ? err.message : "Failed to add vendor");

@@ -1,35 +1,35 @@
 "use client";
 
 /**
- * Section navigation, in the two shapes the shell needs.
+ * Section navigation, strictly isolated by user role.
  *
- * One source of truth for the route list and one for how an item renders. The
- * rail (lg and up) and the horizontal strip (below lg) differ only in
- * orientation — duplicating the item markup between them is how a nav ends up
- * with a route that exists in one and not the other.
- *
- * Routes that are not built render as visibly disabled with a stated reason,
- * because §8.1 forbids dead controls: every control does something, or is
- * visibly disabled and says why.
+ * - ADMIN role sees ONLY Admin Console routes.
+ * - DISTRIBUTOR / WHOLESALER role sees ONLY Wholesaler routes.
  */
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { History, LayoutList, UserPlus, Users, type LucideIcon } from "lucide-react";
+import { History, LayoutList, Package, Shield, UserCog, UserPlus, Users, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/lib/auth/auth-context";
 
 interface NavRoute {
   href: string;
   label: string;
   icon: LucideIcon;
   built: boolean;
+  roleRequired: "ADMIN" | "WHOLESALER";
 }
 
-export const NAV_ROUTES: NavRoute[] = [
-  { href: "/ops", label: "Orders", icon: LayoutList, built: true },
-  { href: "/ops/simulator", label: "Add Customer", icon: UserPlus, built: true },
-  { href: "/ops/history", label: "History", icon: History, built: false },
-  { href: "/ops/contacts", label: "Contacts", icon: Users, built: false },
+export const ADMIN_ROUTES: NavRoute[] = [
+  { href: "/ops/admin", label: "Admin Console", icon: Shield, built: true, roleRequired: "ADMIN" },
+];
+
+export const WHOLESALER_ROUTES: NavRoute[] = [
+  { href: "/ops", label: "Dashboard", icon: LayoutList, built: true, roleRequired: "WHOLESALER" },
+  { href: "/ops/inventory", label: "Inventory", icon: Package, built: true, roleRequired: "WHOLESALER" },
+  { href: "/ops/simulator", label: "Add Customer", icon: UserPlus, built: true, roleRequired: "WHOLESALER" },
+  { href: "/ops/profile", label: "Profile", icon: UserCog, built: true, roleRequired: "WHOLESALER" },
 ];
 
 const NOT_BUILT = "Not in this build — scoped out of the P0 pass";
@@ -91,13 +91,16 @@ function NavItem({
 /** The vertical rail, shown from lg up. */
 export function NavRail() {
   const pathname = usePathname();
+  const { role } = useAuth();
+
+  const visibleRoutes = role === "ADMIN" ? ADMIN_ROUTES : WHOLESALER_ROUTES;
 
   return (
     <nav
       aria-label="Sections"
       className="hidden w-[208px] shrink-0 flex-col gap-1 overflow-y-auto border-r border-line px-3 py-4 lg:flex"
     >
-      {NAV_ROUTES.map((route) => (
+      {visibleRoutes.map((route) => (
         <NavItem
           key={route.href}
           route={route}
@@ -107,10 +110,11 @@ export function NavRail() {
       ))}
 
       <div className="mt-auto space-y-2 rounded-lg bg-stone/50 p-3">
-        <p className="micro">Safety</p>
+        <p className="micro">{role === "ADMIN" ? "Platform Admin" : "Safety"}</p>
         <p className="text-xs leading-relaxed text-ink-dim">
-          Consented business contacts only, within working hours. Prices, credit and terms are never
-          accepted by the agent.
+          {role === "ADMIN"
+            ? "Super Admin Mode. Platform monitoring and CALL-E analytics active."
+            : "Consented business contacts only, within working hours."}
         </p>
       </div>
     </nav>
@@ -120,13 +124,16 @@ export function NavRail() {
 /** The horizontal strip, shown below lg where the rail is hidden. */
 export function NavStrip() {
   const pathname = usePathname();
+  const { role } = useAuth();
+
+  const visibleRoutes = role === "ADMIN" ? ADMIN_ROUTES : WHOLESALER_ROUTES;
 
   return (
     <nav
       aria-label="Sections"
       className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-line px-3 py-2 lg:hidden"
     >
-      {NAV_ROUTES.map((route) => (
+      {visibleRoutes.map((route) => (
         <NavItem
           key={route.href}
           route={route}
