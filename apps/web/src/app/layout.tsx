@@ -1,19 +1,23 @@
 import type { Metadata, Viewport } from "next";
-import { EB_Garamond, Figtree, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { AppProviders } from "@/components/shell/AppProviders";
 
-/* Display serif for headlines and large figures. */
-const garamond = EB_Garamond({
-  variable: "--font-garamond",
-  subsets: ["latin"],
-  style: ["normal", "italic"],
-});
+/* Display serif, interface sans, and live data mono variables */
+let garamondVar = "";
+let figtreeVar = "";
+let geistMonoVar = "";
 
-/* Interface face for everything that is not a headline or a live number. */
-const figtree = Figtree({ variable: "--font-figtree", subsets: ["latin"] });
-
-/* Live data — monospace + tabular so changing values never reflow. */
-const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
+try {
+  const { EB_Garamond, Figtree, Geist_Mono } = require("next/font/google");
+  const garamond = EB_Garamond({ variable: "--font-garamond", subsets: ["latin"], style: ["normal", "italic"] });
+  const figtree = Figtree({ variable: "--font-figtree", subsets: ["latin"] });
+  const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
+  garamondVar = garamond.variable;
+  figtreeVar = figtree.variable;
+  geistMonoVar = geistMono.variable;
+} catch {
+  // Fallback if offline
+}
 
 export const metadata: Metadata = {
   title: "Sentinel Ops — wholesale coordination on CALL-E",
@@ -47,12 +51,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       lang="en"
       data-theme="light"
       suppressHydrationWarning
-      className={`${garamond.variable} ${figtree.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${garamondVar} ${figtreeVar} ${geistMonoVar} h-full antialiased`}
     >
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
       </head>
-      <body className="min-h-full">{children}</body>
+      <body className="min-h-full">
+        <AppProviders>{children}</AppProviders>
+      </body>
     </html>
   );
 }

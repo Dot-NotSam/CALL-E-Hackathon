@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { StoreError, overrideResult } from "@/lib/mock/store";
+import { overrideResult } from "@/lib/db/orders-repository";
+import { StoreError } from "@/lib/mock/store";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,7 @@ export async function POST(
   }
 
   try {
-    overrideResult(id, parsed.data.structured);
+    await overrideResult(id, parsed.data.structured);
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof StoreError) {

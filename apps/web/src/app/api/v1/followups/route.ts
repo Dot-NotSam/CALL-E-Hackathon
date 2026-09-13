@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { listFollowUps } from "@/lib/mock/store";
+import { listFollowUps } from "@/lib/db/orders-repository";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/v1/followups — every scheduled callback and verification call, soonest first. */
+/** GET /api/v1/followups — scheduled callbacks and verification calls, soonest first. */
 export async function GET() {
-  return NextResponse.json({ followUps: listFollowUps(), source: "mock" });
+  const followUps = await listFollowUps();
+  return NextResponse.json({ followUps });
 }

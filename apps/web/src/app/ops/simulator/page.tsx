@@ -1,7 +1,7 @@
-import { NewOrderConsole } from "@/components/ops/NewOrderConsole";
+import { AddCustomerConsole } from "@/components/ops/AddCustomerConsole";
 
-export const metadata = { title: "New order — Sentinel Ops" };
+export const metadata = { title: "Add new customer — Sentinel Ops" };
 
-export default function SimulatorPage() {
-  return <NewOrderConsole />;
+export default function AddCustomerPage() {
+  return <AddCustomerConsole />;
 }

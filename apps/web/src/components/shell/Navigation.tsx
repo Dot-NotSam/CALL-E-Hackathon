@@ -15,7 +15,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { History, LayoutList, PhoneOutgoing, Users, type LucideIcon } from "lucide-react";
+import { History, LayoutList, UserPlus, Users, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface NavRoute {
@@ -27,7 +27,7 @@ interface NavRoute {
 
 export const NAV_ROUTES: NavRoute[] = [
   { href: "/ops", label: "Orders", icon: LayoutList, built: true },
-  { href: "/ops/simulator", label: "New order", icon: PhoneOutgoing, built: true },
+  { href: "/ops/simulator", label: "Add Customer", icon: UserPlus, built: true },
   { href: "/ops/history", label: "History", icon: History, built: false },
   { href: "/ops/contacts", label: "Contacts", icon: Users, built: false },
 ];

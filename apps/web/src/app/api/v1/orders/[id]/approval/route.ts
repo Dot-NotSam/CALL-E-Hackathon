@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { StoreError, decideApproval } from "@/lib/mock/store";
+import { decideApproval } from "@/lib/db/orders-repository";
+import { StoreError } from "@/lib/mock/store";
 
 export const dynamic = "force-dynamic";
 
@@ -10,9 +11,7 @@ const Body = z.object({
 });
 
 /**
- * POST /api/v1/orders/:id/approval — an operator's decision on a commercial
- * change the agent was not allowed to accept (FR-5.3). Responds 409 if the
- * order is not waiting for one.
+ * POST /api/v1/orders/:id/approval — operator decision on price change (FR-5.3).
  */
 export async function POST(
   request: Request,
@@ -22,13 +21,13 @@ export async function POST(
   const parsed = Body.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
     return NextResponse.json(
-      { error: "bad_request", message: "Expected { decision: \"APPROVE\" | \"REJECT\", note? }" },
+      { error: "bad_request", message: 'Expected { decision: "APPROVE" | "REJECT", note? }' },
       { status: 400 },
     );
   }
 
   try {
-    decideApproval(id, parsed.data.decision, parsed.data.note);
+    await decideApproval(id, parsed.data.decision, parsed.data.note);
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof StoreError) {

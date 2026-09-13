@@ -1,4 +1,5 @@
 import { getRun, subscribe } from "@/lib/mock/store";
+import { getOrderEvents } from "@/lib/db/orders-repository";
 import type { SentinelEvent } from "@/lib/contracts/events";
 
 export const dynamic = "force-dynamic";
@@ -8,9 +9,7 @@ export const runtime = "nodejs";
  * GET /api/v1/orders/:id/stream — Server-Sent Events carrying the
  * `SentinelEvent` union (docs/FRONTEND_BACKEND_CONTRACT.md §5).
  *
- * Events already emitted are replayed first, so a page loaded mid-call — or a
- * finished order opened from history — shows the whole story rather than a
- * half-built timeline.
+ * Events already emitted are replayed first upon client connection.
  */
 export async function GET(
   request: Request,
@@ -18,8 +17,9 @@ export async function GET(
 ) {
   const { id } = await params;
   const run = getRun(id);
+  const pastEvents = await getOrderEvents(id);
 
-  if (!run) {
+  if (!run && pastEvents.length === 0) {
     return new Response(JSON.stringify({ error: "not_found" }), {
       status: 404,
       headers: { "content-type": "application/json" },
@@ -51,12 +51,14 @@ export async function GET(
       };
 
       comment("stream open");
-      run.emitted.forEach(send);
 
-      const unsubscribe = subscribe(run, send);
+      // Replay all past events
+      const eventsToReplay = pastEvents.length > 0 ? pastEvents : run ? run.emitted : [];
+      eventsToReplay.forEach(send);
 
-      // Keep-alive: proxies drop idle connections, and a silently dead stream
-      // is worse on camera than a visible "reconnecting" (§7.4).
+      const unsubscribe = run ? subscribe(run, send) : () => {};
+
+      // Keep-alive pings every 15 seconds
       const heartbeat = setInterval(() => comment("keep-alive"), 15_000);
 
       const close = () => {

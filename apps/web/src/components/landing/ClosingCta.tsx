@@ -14,7 +14,7 @@ export function ClosingCta() {
             Start <em>coordinating.</em>
           </h2>
           <div className="mt-12 flex flex-wrap items-center justify-center gap-3">
-            <Link href="/ops" className={buttonStyles({ variant: "primary", size: "lg" })}>
+            <Link href="/login" className={buttonStyles({ variant: "primary", size: "lg" })}>
               Open operations
             </Link>
             <Link
@@ -24,7 +24,7 @@ export function ClosingCta() {
                 "border-on-band/30 text-on-band hover:not-disabled:bg-on-band/10 hover:not-disabled:text-on-band",
               )}
             >
-              Place an order
+              Add new customer
             </Link>
           </div>
         </div>
@@ -39,7 +39,7 @@ export function ClosingCta() {
               Orders
             </Link>
             <Link href="/ops/simulator" className="text-ink-dim transition-colors hover:text-ink">
-              New order
+              Add customer
             </Link>
           </nav>
         </div>

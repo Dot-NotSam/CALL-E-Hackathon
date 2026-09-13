@@ -42,6 +42,9 @@ export type Contact = {
   phoneE164: string;
   productCategories: string[];
   region: string;
+  workplaceLocation?: string;
+  livingLocation?: string;
+  shopName?: string;
   workingHours: WorkingHours;
   /** 1 = primary, 2 = backup, 3 = supervisor. */
   escalationPriority: number;

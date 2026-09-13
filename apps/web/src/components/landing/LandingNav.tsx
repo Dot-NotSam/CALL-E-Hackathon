@@ -39,9 +39,9 @@ export function LandingNav() {
             href="/ops/simulator"
             className="hidden rounded-md px-3 py-2 text-sm text-ink-dim transition-colors hover:text-ink sm:block"
           >
-            Try a call
+            Add Customer
           </Link>
-          <Link href="/ops" className={buttonStyles({ variant: "primary", size: "md" })}>
+          <Link href="/login" className={buttonStyles({ variant: "primary", size: "md" })}>
             Open operations
           </Link>
         </div>
