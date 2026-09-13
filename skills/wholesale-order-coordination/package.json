@@ -1,0 +1,22 @@
+{
+  "name": "wholesale-order-coordination",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Phone a supplier to confirm stock, quantity, price and dispatch; negotiate a partial commitment; escalate when nobody answers.",
+  "scripts": {
+    "demo": "CALLE_USE_MOCK=true ts-node scripts/run_coordination.ts",
+    "demo:partial": "CALLE_USE_MOCK=true MOCK_OUTCOME=partial ts-node scripts/run_coordination.ts",
+    "demo:price": "CALLE_USE_MOCK=true MOCK_OUTCOME=price_change ts-node scripts/run_coordination.ts",
+    "demo:ladder": "CALLE_USE_MOCK=true MOCK_OUTCOME=no_answer ts-node scripts/run_coordination.ts",
+    "demo:vague": "CALLE_USE_MOCK=true MOCK_OUTCOME=vague ts-node scripts/run_coordination.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@call-e/calle": "^0.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.4.0"
+  }
+}

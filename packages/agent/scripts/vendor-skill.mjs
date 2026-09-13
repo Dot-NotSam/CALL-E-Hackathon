@@ -6,7 +6,7 @@
  *
  * WHY THIS EXISTS
  *
- * The skill in skills/autonomous-incident-escalation/ is submitted to
+ * The skill in skills/wholesale-order-coordination/ is submitted to
  * CALLE-AI/awesome-phone-call-agents, where `../../../packages/...` resolves
  * to nothing. It has to be self-contained.
  *
@@ -29,7 +29,7 @@ import { fileURLToPath } from "node:url";
 
 // packages/agent/scripts/ → repo root
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const OUT_DIR = join(ROOT, "skills", "autonomous-incident-escalation", "scripts", "lib");
+const OUT_DIR = join(ROOT, "skills", "wholesale-order-coordination", "scripts", "lib");
 
 /** source path → vendored module name */
 const MODULES = [
@@ -39,10 +39,15 @@ const MODULES = [
   ["packages/calle/progress.ts", "progress"],
   ["packages/calle/planCall.ts", "planCall"],
   ["packages/agent/state.ts", "state"],
-  ["packages/agent/nodes/assessIncident.ts", "assessIncident"],
-  ["packages/agent/nodes/selectResponder.ts", "selectResponder"],
+  ["packages/agent/nodes/assessOrder.ts", "assessOrder"],
+  ["packages/agent/nodes/selectContact.ts", "selectContact"],
   ["packages/agent/nodes/decide.ts", "decide"],
   ["packages/agent/nodes/escalate.ts", "escalate"],
+  ["packages/agent/nodes/confirm.ts", "confirm"],
+  ["packages/agent/nodes/approval.ts", "approval"],
+  ["packages/agent/nodes/scheduleCallback.ts", "scheduleCallback"],
+  ["packages/agent/nodes/humanReview.ts", "humanReview"],
+  ["packages/agent/nodes/unresolved.ts", "unresolved"],
 ];
 
 /** Every vendored module sits in one flat directory. */

@@ -1,0 +1,157 @@
+/**
+ * VENDORED — do not edit.
+ *
+ * Generated from packages/calle/schema.ts by packages/agent/scripts/vendor-skill.mjs.
+ * Edit the source file and re-run the generator; edits here are overwritten.
+ */
+
+/**
+ * packages/calle/schema.ts
+ * CALL-E result schema — frozen contract (PRD §7.2)
+ * Owner: Aryan + Tanmay
+ *
+ * This is the single source of truth for what we extract from every call.
+ * Do NOT inline a different schema anywhere else.
+ *
+ * Typed extraction is the whole reason a phone call can drive a workflow: the
+ * order update branches on these fields, never on prose. Confirmed live on
+ * 2026-09-08 (testing log P-003) — free-form speech mapped onto the v1 schema
+ * without a second LLM pass.
+ *
+ * The `descriptions` are not documentation for us — CALL-E shows them to the
+ * model doing the extraction, so they are part of the prompt. Vague wording
+ * here produces vague fields.
+ */
+
+import type { WholesaleResult } from "./types";
+
+export const WHOLESALE_COORDINATION_RESULT_SCHEMA = {
+  type: "object",
+  required: ["contact_reached", "stock_status", "next_action"],
+  properties: {
+    contact_reached: {
+      type: "string",
+      enum: ["yes", "no", "wrong_person", "voicemail", "unknown"],
+      description:
+        "Who actually took the call. Use 'yes' ONLY if the person explicitly " +
+        "confirmed they are the named contact when asked — not if they merely " +
+        "answered the phone, engaged with the questions, or seemed to be the " +
+        "right person. Use 'wrong_person' if someone else answered, " +
+        "'voicemail' if no human answered, and 'unknown' if the call was never " +
+        "asked or never clearly answered. An unclear answer is not 'yes'.",
+    },
+    stock_status: {
+      type: "string",
+      enum: ["confirmed", "partial", "unavailable", "unknown"],
+      description:
+        "Whether the supplier can meet the requested quantity in full " +
+        "('confirmed'), in part ('partial'), or not at all ('unavailable'). " +
+        "Use 'unknown' if they would not or could not say.",
+    },
+    confirmed_quantity: {
+      type: "number",
+      description:
+        "Units the supplier committed to supplying now, in the order's unit of " +
+        "measure. Omit if nothing was committed. A hedged number — 'about 200', " +
+        "'approx 200', 'around 200' — is NOT a commitment: omit this field and " +
+        "put their words in verbatim_commitment instead.",
+    },
+    remaining_quantity: {
+      type: "number",
+      description:
+        "Units still outstanding after the confirmed quantity. Set this on a " +
+        "partial confirmation so the remainder can be chased.",
+    },
+    unit_price: {
+      type: "number",
+      description:
+        "Price per unit the supplier quoted on THIS call. Record it even when " +
+        "it differs from the order — especially then. Never negotiate it.",
+    },
+    currency: {
+      type: "string",
+      description: "ISO-4217 code for unit_price, e.g. INR.",
+    },
+    dispatch_date: {
+      type: "string",
+      description:
+        "When the supplier said the goods will leave their premises, as " +
+        "YYYY-MM-DD. Resolve 'today', 'tomorrow' and similar against the " +
+        "contact's local date given in the task — NOT against UTC or any other " +
+        "clock. A call placed late in the evening UTC is already the next day " +
+        "for the contact, and a dispatch date that is a day out can mark a late " +
+        "order on time. Omit if no concrete date was given.",
+    },
+    delivery_eta: {
+      type: "string",
+      description:
+        "When the supplier expects delivery to arrive. May be the supplier's " +
+        "own words if they gave no concrete date.",
+    },
+    delay_reason: {
+      type: "string",
+      description:
+        "The supplier's stated reason for any shortfall or delay, in their own terms.",
+    },
+    callback_requested_at: {
+      type: "string",
+      description:
+        "ISO-8601 time if the contact asked to be called back later. " +
+        "Resolve relative times ('after lunch', 'at four') against the " +
+        "current date before writing this field.",
+    },
+    requires_approval: {
+      type: "boolean",
+      description:
+        "True when the supplier proposed a change this call may not accept — " +
+        "a different unit price, changed credit or payment terms, or any " +
+        "contractual condition. A human decides these.",
+    },
+    verbatim_commitment: {
+      type: "string",
+      description:
+        "The contact's exact words committing to, qualifying, or refusing the " +
+        "order. Quote them; do not paraphrase.",
+    },
+    next_action: {
+      type: "string",
+      enum: [
+        "CONFIRM_ORDER",
+        "PARTIAL_CONFIRMATION",
+        "REQUEST_APPROVAL",
+        "SCHEDULE_CALLBACK",
+        "ESCALATE_NEXT_CONTACT",
+        "HUMAN_REVIEW",
+      ],
+      description:
+        "What the workflow should do next based on this call's outcome.",
+    },
+  },
+} as const;
+
+/**
+ * Compile-time guard: the JSON Schema we hand CALL-E and the `WholesaleResult`
+ * type the agent branches on must not drift.
+ *
+ * This checks the two directions that actually cause bugs — a property in the
+ * schema with no home in the type, and a required field the type has as
+ * optional. It cannot check JSON Schema `type` keywords against TypeScript
+ * types, so a `{ type: "number" }` on a `string` field still needs a test.
+ */
+type SchemaPropertyNames = keyof typeof WHOLESALE_COORDINATION_RESULT_SCHEMA.properties;
+type ResultFieldNames = keyof WholesaleResult;
+
+type AssertExtends<A extends B, B> = true;
+
+export type _SchemaMatchesResultType =
+  // Every schema property is a field on WholesaleResult...
+  AssertExtends<SchemaPropertyNames, ResultFieldNames> &
+  // ...and every WholesaleResult field is declared in the schema.
+  AssertExtends<ResultFieldNames, SchemaPropertyNames>;
+
+/** The fields CALL-E must always return. Mirrors `required` above. */
+export const REQUIRED_RESULT_FIELDS = [
+  "contact_reached",
+  "stock_status",
+  "next_action",
+] as const satisfies readonly ResultFieldNames[];
