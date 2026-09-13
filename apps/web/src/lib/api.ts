@@ -53,3 +53,37 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   }
   return payload as T;
 }
+
+export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(apiUrl(path), {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message =
+      typeof payload === "object" && payload && "message" in payload
+        ? String((payload as { message: unknown }).message)
+        : `Request failed (${response.status})`;
+    throw new ApiError(message, response.status);
+  }
+  return payload as T;
+}
+
+export async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
+  const response = await fetch(apiUrl(path), {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message =
+      typeof payload === "object" && payload && "message" in payload
+        ? String((payload as { message: unknown }).message)
+        : `Request failed (${response.status})`;
+    throw new ApiError(message, response.status);
+  }
+  return payload as T;
+}
