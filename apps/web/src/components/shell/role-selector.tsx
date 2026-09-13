@@ -23,12 +23,15 @@ export function RoleSelector({ currentRole: propRole, onRoleChange, className }:
   );
 
   useEffect(() => {
-    const saved = localStorage.getItem("sentinel_user_role") as RoleOption;
-    if (saved && ["ADMIN", "DISTRIBUTOR"].includes(saved)) {
-      setRole(saved);
-      onRoleChange?.(saved);
+    if (propRole && (propRole === "ADMIN" || propRole === "DISTRIBUTOR")) {
+      setRole(propRole as RoleOption);
+    } else {
+      const saved = localStorage.getItem("sentinel_user_role") as RoleOption;
+      if (saved && ["ADMIN", "DISTRIBUTOR"].includes(saved)) {
+        setRole(saved);
+      }
     }
-  }, []);
+  }, [propRole]);
 
   const handleSelect = (newRole: RoleOption) => {
     setRole(newRole);
