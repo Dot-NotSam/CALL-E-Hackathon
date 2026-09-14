@@ -59,7 +59,7 @@ export default function RegisterPage() {
           <BrandMark />
           <h1 className="text-2xl font-serif font-semibold text-ink mt-3">Create an Account</h1>
           <p className="text-sm text-ink-dim">
-            Register for Role-Based Access on Sentinel Ops
+            Register for Role-Based Access on Market Buddy
           </p>
         </div>
 

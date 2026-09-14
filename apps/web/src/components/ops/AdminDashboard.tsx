@@ -171,7 +171,7 @@ export function AdminDashboard() {
         <div>
           <p className="eyebrow flex items-center gap-1.5 text-lilac">
             <Shield className="h-3.5 w-3.5 text-lilac" />
-            Sentinel Ops · Super Admin Console
+            Market Buddy · Super Admin Console
           </p>
           <h1 className="display mt-2 text-display-s text-ink">
             Platform <em>Admin Dashboard</em>

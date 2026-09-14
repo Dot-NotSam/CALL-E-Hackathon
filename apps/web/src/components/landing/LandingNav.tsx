@@ -17,7 +17,7 @@ export function LandingNav() {
         aria-label="Primary"
         className="mx-auto flex max-w-[1040px] items-center gap-3 rounded-2xl border border-line bg-canvas/85 py-2 pl-5 pr-2 shadow-[var(--shadow-float)] backdrop-blur-md"
       >
-        <Link href="/" aria-label="Sentinel Ops home">
+        <Link href="/" aria-label="Market Buddy home">
           <BrandMark />
         </Link>
 

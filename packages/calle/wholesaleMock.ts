@@ -15,7 +15,7 @@
  */
 
 import type { CallProgressHooks } from "./progress";
-import type { CallStatus as SentinelCallState } from "../types";
+import type { CallState as SentinelCallState } from "../types";
 import type { WholesaleResult } from "../types/wholesale";
 
 export type WholesaleScenario =

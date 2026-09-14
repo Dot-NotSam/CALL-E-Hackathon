@@ -22,7 +22,7 @@ export function StatementBand() {
         </h2>
         <p className="max-w-[48ch] text-lg leading-relaxed text-on-band/75 lg:col-span-5">
           A system can say 200 cases are in stock. Only a person at the supplier can say 120 will leave today and 80
-          tomorrow. Sentinel Ops gets that answer on the phone — and turns it into data an order can use.
+          tomorrow. Market Buddy gets that answer on the phone — and turns it into data an order can use.
         </p>
       </div>
 

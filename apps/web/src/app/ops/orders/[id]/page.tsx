@@ -7,7 +7,7 @@ export async function generateMetadata({
   params: Promise<{ id: string }>;
 }): Promise<Metadata> {
   const { id } = await params;
-  return { title: `${id} — Sentinel Ops` };
+  return { title: `${id} — Market Buddy` };
 }
 
 export default async function OrderPage({ params }: { params: Promise<{ id: string }> }) {

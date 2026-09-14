@@ -193,6 +193,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const isDemo =
         email.includes("admin") ||
         email.includes("wholesaler") ||
+        email.includes("marketbuddy") ||
         email.includes("sentinelops") ||
         email.includes("northgate");
 

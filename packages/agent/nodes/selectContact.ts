@@ -20,7 +20,16 @@
  */
 
 import type { Contact, Urgency } from "../../types";
-import type { CoordinationState } from "../state";
+type ContactSelectionState = {
+  seller: { id: string; name: string };
+  attemptedContacts: string[];
+};
+
+type GraphSelectionState = {
+  seller?: { id: string; name: string };
+  order?: { seller: { id: string; name: string } };
+  attemptedContacts: string[];
+};
 
 export type SelectContactResult = "plan_call" | "unresolved";
 
@@ -132,7 +141,7 @@ export interface SelectionOutcome {
  * Returns null when none is eligible, which routes to unresolved.
  */
 export function selectBestContact(
-  state: CoordinationState,
+  state: ContactSelectionState,
   roster: Contact[],
   options: SelectContactOptions = {}
 ): SelectionOutcome {
@@ -188,4 +197,43 @@ export function mayOverrideWorkingHours(
   policyAllowsOverride: boolean
 ): boolean {
   return policyAllowsOverride && urgency === "URGENT";
+}
+
+/** Compatibility adapter for the coordination graph's audit-oriented result. */
+export function selectContactWithReason(
+  state: GraphSelectionState,
+  roster: Contact[],
+): { contact: Contact | null; reason: string | null; detail: string } {
+  const seller = state.seller ?? state.order?.seller;
+  if (!seller) {
+    return { contact: null, reason: "none_at_seller", detail: "Seller context is missing." };
+  }
+
+  const outcome = selectBestContact({ attemptedContacts: state.attemptedContacts, seller }, roster, {
+    requiredCategory: undefined,
+    allowOutsideWorkingHours: false,
+  });
+
+  if (outcome.contact) {
+    return {
+      contact: outcome.contact,
+      reason: null,
+      detail: `Selected ${outcome.contact.name}.`,
+    };
+  }
+
+  const rejection = outcome.rejections[0];
+  const reason = rejection?.reason.toLowerCase().includes("working hours")
+    ? "outside_working_hours"
+    : rejection?.reason.toLowerCase().includes("category")
+      ? "no_product_match"
+      : rejection?.reason.toLowerCase().includes("cooldown")
+        ? "in_cooldown"
+        : "none_at_seller";
+
+  return {
+    contact: null,
+    reason,
+    detail: rejection?.reason ?? `No eligible contact for ${seller.name}.`,
+  };
 }

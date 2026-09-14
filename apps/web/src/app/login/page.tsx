@@ -47,7 +47,7 @@ export default function LoginPage() {
           <BrandMark />
           <h1 className="text-2xl font-serif font-semibold text-ink mt-3">Welcome Back</h1>
           <p className="text-sm text-ink-dim">
-            Sign in to Sentinel Ops Wholesale Coordination Desk
+            Sign in to Market Buddy Wholesale Coordination Desk
           </p>
         </div>
 
@@ -57,7 +57,7 @@ export default function LoginPage() {
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
-              onClick={() => fillQuickDemo("admin@sentinelops.ai", "ADMIN")}
+              onClick={() => fillQuickDemo("admin@marketbuddy.ai", "ADMIN")}
               className="flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-medium rounded-lg border border-amber-500/20 bg-amber-500/10 text-amber-700 hover:bg-amber-500/20 transition-colors cursor-pointer"
             >
               <Shield className="h-3.5 w-3.5" />

@@ -57,7 +57,7 @@ export function Hero() {
   return (
     <section className="relative overflow-hidden pb-24 pt-20 sm:pt-28">
       <div className="container-page text-center">
-        <p className="eyebrow">Sentinel Ops · Wholesale coordination</p>
+        <p className="eyebrow">Market Buddy · Wholesale Voice Coordination</p>
 
         <h1 className="display mx-auto mt-7 max-w-[14ch] text-display-l text-ink">
           Wholesale calls.
@@ -66,7 +66,7 @@ export function Hero() {
         </h1>
 
         <p className="mx-auto mt-8 max-w-[46ch] text-lg leading-relaxed text-ink-dim">
-          When a distributor needs a real answer, Sentinel Ops calls the wholesaler, negotiates stock and dispatch,
+          When a distributor needs a real answer, Market Buddy calls the wholesaler, negotiates stock and dispatch,
           then writes the commitment back to the order.
         </p>
 

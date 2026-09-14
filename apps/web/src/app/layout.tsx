@@ -20,9 +20,9 @@ try {
 }
 
 export const metadata: Metadata = {
-  title: "Sentinel Ops — wholesale coordination on CALL-E",
+  title: "Market Buddy — Wholesale Voice Coordination on CALL-E",
   description:
-    "Sentinel Ops calls the wholesaler, negotiates stock and dispatch, and writes the commitment back to the order.",
+    "Market Buddy calls the wholesaler, negotiates stock and dispatch, and writes the commitment back to the order.",
 };
 
 export const viewport: Viewport = {
