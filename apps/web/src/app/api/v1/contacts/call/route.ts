@@ -170,6 +170,7 @@ export async function POST(request: Request) {
       /** Null when the call produced nothing usable — never a placeholder. */
       structuredResult,
       completionConfidence: confidence,
+      transcript: finalState.transcript || [],
       callPlaced: finalState.callHistory.length > 0,
       /** Set when the agent refused to dial or the call errored. */
       blockedReason: finalState.callError,
