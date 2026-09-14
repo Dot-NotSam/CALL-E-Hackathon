@@ -19,7 +19,11 @@
       }
     ],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@sentinel/types/wholesale": ["../../packages/types/wholesale.ts"],
+      "@sentinel/types": ["../../packages/types/index.ts"],
+      "@sentinel/agent/coordination": ["../../packages/agent/coordination.ts"],
+      "@sentinel/calle/wholesale": ["../../packages/calle/wholesale.ts"]
     }
   },
   "include": [
@@ -28,7 +32,8 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
-    "**/*.mts"
+    "**/*.mts",
+    "../../packages/types/wholesale.ts"
   ],
   "exclude": ["node_modules"]
 }

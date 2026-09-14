@@ -2,6 +2,11 @@
   "name": "@sentinel/calle",
   "version": "0.1.0",
   "main": "./client.ts",
+  "exports": {
+    ".": "./client.ts",
+    "./mock": "./mock.ts",
+    "./wholesale": "./wholesale.ts"
+  },
   "dependencies": {
     "@call-e/calle": "^0.7.0"
   }

@@ -93,6 +93,30 @@ Old account: 4 calls spent (#1–#4), balance unknown, assume 0.
 > credits, and that exhaustion surfaces as an opaque carrier 404 rather than a
 > quota error** (see F-005). Counts below are for the NEW account.
 
+### Wholesale migration — 2026-09-14 (no credits spent)
+
+The agent was migrated from the v1 incident model to the v2 wholesale
+coordination model. The whole path was verified against the **mock** driver
+only — **no live call was placed, and no credits were spent.**
+
+Verified end to end over HTTP (`next start`, `CALLE_USE_MOCK=true`):
+
+| Check | Result |
+|---|---|
+| `POST /api/v1/simulator/trigger` runs the real LangGraph agent | ✅ `driver: "agent"` |
+| Kill switch engaged → agent refuses to dial | ✅ `423 kill_switch_engaged` |
+| Kill switch missing or throwing → fails closed | ✅ 0 dials (tested) |
+| Contact ladder, call cap, no-repeat-dial | ✅ 185 tests passing |
+| Confidence < 0.7 never auto-closes an order | ✅ tested adversarially |
+| Price change never auto-accepted (FR-5.3) | ✅ tested adversarially |
+| SSE stream carries the full agent run | ✅ 15 frames, one `traceId` |
+
+**Outstanding for a live run (item 6):** `CALLE_API_KEY` is empty in `.env`, and
+the SIP 500 outage recorded in calls #7 and #8 has not been retested since
+2026-09-09. A live run needs a working key and a consented number, and should
+be a **single** call to establish whether the outage has cleared — not a
+rehearsal loop.
+
 ### Live call log
 
 | # | Date | Phase | Purpose | Outcome | Notes |
@@ -123,6 +147,7 @@ are preserved verbatim in `live-call-raw.json`.
 | F-010 | 2026-09-09 | API | Recording the final status of a failed call | `task.status` reflects the attempt once the attempt is terminal. | The attempt had `status=failed, failureCode=480` while `task.status` was **still `queued`** — the task-level status lags by several seconds. A consumer that stops polling when the attempt reaches a terminal state (the only way to react promptly) reads a stale task status and records a failed call as "queued". | Poll a call that fails to connect; compare `task.status` against `attempts[-1].status` on the same response. | Minor | Update `task.status` in the same write as the terminal attempt status, or document the lag so consumers know to derive state from the attempt. |
 | F-006 | 2026-09-08 | API | Streaming a live transcript to a dashboard during the call | Transcript turns appear on `attempt.transcriptTurns` incrementally as the conversation happens. | All 21 turns appeared **at once**, on the poll where `attempt.status` flipped to `completed`. During the ~50s conversation, `transcriptTurns` stayed empty across 16 polls. A live transcript UI is therefore impossible via polling — the conversation is only visible once it is over. | Poll `calls.get()` every 2s through an answered call. | **Major** | Publish turns incrementally, or document that they are completion-only and provide a streaming/webhook alternative for live UIs. This is the single biggest blocker to building a live call view on CALL-E. |
 | F-007 | 2026-09-08 | API | Diffing transcript turns between polls to stream only new ones | A published turn is immutable, so new turns can be detected by index. | Turns are **revised after publication** — `"hello."` on one poll became `"Hello."` on the next, and `"no, i don't need."` became `"No, I don't need."`. Any consumer diffing by array length re-emits the whole revised tail, duplicating it in the UI. | Compare `transcriptTurns` across two polls after completion. | Minor | Either freeze turns once published, or give each turn a stable `id` so consumers can dedupe reliably. |
+| F-012 | 2026-09-14 | SDK / API | Selecting the voice or persona for an outbound call | A documented way to choose the voice, or at minimum the language/accent, per call — the field-facing side of a call is a human hearing a voice, and an operations line calling Indian suppliers wants an Indian-English voice. | `CreateCallInput` accepts `task`, `recipient`, `resultSchema` and `metadata`. There is **no voice, persona, accent, speed or audio parameter**, and `recipient.locale` is undocumented as to whether it affects speech at all. Teams that have already integrated ElevenLabs or a local TTS cannot route it into the call, so that work is stranded — our own `packages/calle/voice.ts` synthesises audio that the phone call can never use. | Inspect `CreateCallInput`; try to set any voice property. | **Major** | Expose a per-call `voice` (id or preset) and confirm in the docs whether `recipient.locale` changes the speaking voice. Even a small enumerated set of voices per language would let a team match the callee's region. |
 | F-008 | 2026-09-08 | API | Reading `taskCompleted` after a successful negotiation | `taskCompleted: true` — the agent obtained a clear yes and a numeric ETA. | `taskCompleted: false` with confidence 0.86, because the bot skipped one instructed step (the closing read-back). The `evidence` array explained this precisely and usefully. The flag is arguably right but reads as a failure for a call that achieved its objective, so control flow cannot rely on it alone. | Run a task whose prompt has more required steps than the conversation needs. | Polish | Document that `taskCompleted` means "every instruction followed", not "objective achieved" — they diverge, and `evidence` is the field that explains the gap. |
 | F-005 | 2026-09-08 | API / SDK / Dashboard | Diagnosing why an accepted call never rang | Enough information, from the API alone, to tell "you are out of credits" from "that number is unroutable" from "the carrier rejected it". | Nothing distinguishes them. `calls.listEvents()` returned 10 events whose `details` is `{}` on every single one — **including the terminal `call.failed` error event**, whose message (`"calling task completed with status=FAILED"`) only restates the status. The dial lasted 361ms (`status=calling` 15:27:29.380 → "Call ended" 15:27:29.741). The SDK exposes `calls`, `goals`, and `webhooks` but **no account, usage, or quota endpoint**, so a developer cannot check programmatically whether they have simply run out of credits. The only route is the web dashboard. | `calle.calls.listEvents(id)` on any failed call. | **Major** | Populate `details` on `call.failed` with the provider's reason, and add a lightweight account/usage endpoint (`calls remaining`, `plan status`). For a product whose free tier is 20 calls, "have I run out?" should be answerable from the API. |
 | F-004 | 2026-09-08 | API | Interpreting a failed attempt | An enumerated, documented failure reason. | `attempt.failureCode` = `"404"` — a bare numeric string, undocumented, with `failureMessage: null`. Task level gave `"call_failed"` / `"calling task status=FAILED"`, which restates the status rather than explaining it. Impossible to distinguish "no answer" from "unroutable number" from "carrier rejection" — and those need different agent behaviour (escalate vs. flag a bad roster entry). | Call a number that fails to connect. | **Major** | Enumerate `failureCode` in the OpenAPI schema, and populate `failureMessage` with something actionable. |

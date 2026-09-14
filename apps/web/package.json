@@ -9,6 +9,9 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@sentinel/agent": "workspace:*",
+    "@sentinel/calle": "workspace:*",
+    "@sentinel/types": "workspace:*",
     "@supabase/supabase-js": "^2.116.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

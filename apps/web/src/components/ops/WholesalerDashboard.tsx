@@ -32,7 +32,7 @@ import type { Contact } from "@/lib/contracts/domain";
 import { Panel } from "@/components/ui/Panel";
 import { StateChip } from "@/components/ui/StateChip";
 import { Button, buttonStyles } from "@/components/ui/Button";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import { maskPhone } from "@/lib/mock/directory";
 
 type CallStatus = "idle" | "dialling" | "connected" | "extracting" | "completed";
@@ -44,13 +44,87 @@ interface VendorCallState {
   timestamp?: string;
 }
 
-const SAMPLE_OUTPUTS: Array<{ output: string; state: "success" | "warning" | "critical" | "info" }> = [
-  { output: "✓ Stock Confirmed (200 cases @ ₹1,850) — Dispatch Today", state: "success" },
-  { output: "⏳ Partial Stock (120 cases ready today, 80 tomorrow)", state: "warning" },
-  { output: "📞 Callback Scheduled for 14:30 IST", state: "info" },
-  { output: "⚠️ Unit Price Dispute (₹1,950 requested vs ₹1,850 baseline)", state: "critical" },
-  { output: "✓ Order Verified — Delivery ETA: Tomorrow 11:00 AM", state: "success" },
-];
+/** The result CALL-E extracted, rendered for the vendor row. */
+interface CallOutcome {
+  outcome: string | null;
+  callPlaced: boolean;
+  blockedReason: string | null;
+  /** "calle" = a real phone call; "mock" = the dev harness. */
+  driver?: "calle" | "mock";
+  completionConfidence: { score: number; label: string } | null;
+  structuredResult: {
+    confirmed_quantity?: number;
+    remaining_quantity?: number;
+    dispatch_date?: string;
+    unit_price?: number;
+    callback_requested_at?: string;
+    next_action?: string;
+  } | null;
+}
+
+/**
+ * Turns a real call result into the line shown in "Latest Call Output".
+ *
+ * Every branch below is derived from what CALL-E returned. There is no sample
+ * or placeholder text: a call that produced nothing usable says exactly that,
+ * because a fabricated commitment on this screen is indistinguishable from a
+ * real one (Rule 8).
+ */
+function describeOutcome(result: CallOutcome): {
+  output: string;
+  state: "success" | "warning" | "critical" | "info";
+} {
+  if (result.blockedReason) {
+    return { output: result.blockedReason, state: "critical" };
+  }
+
+  if (!result.callPlaced) {
+    return { output: "No call was placed.", state: "critical" };
+  }
+
+  const s = result.structuredResult;
+  const confidence = result.completionConfidence;
+  const suffix = confidence ? ` · ${Math.round(confidence.score * 100)}% confidence` : "";
+
+  switch (result.outcome) {
+    case "CONFIRMED":
+      return {
+        output:
+          `✓ Confirmed${s?.confirmed_quantity ? ` (${s.confirmed_quantity} cases)` : ""}` +
+          `${s?.dispatch_date ? ` — dispatch ${s.dispatch_date}` : ""}${suffix}`,
+        state: "success",
+      };
+
+    case "PARTIALLY_CONFIRMED":
+      return {
+        output:
+          `⏳ Partial — ${s?.confirmed_quantity ?? "some"} now, ` +
+          `${s?.remaining_quantity ?? "balance"} outstanding${suffix}`,
+        state: "warning",
+      };
+
+    case "APPROVAL_REQUIRED":
+      return {
+        output: `⚠️ Price change${s?.unit_price ? ` (₹${s.unit_price})` : ""} — needs your approval`,
+        state: "critical",
+      };
+
+    case "CALLBACK_SCHEDULED":
+      return {
+        output: `📞 Callback scheduled${s?.callback_requested_at ? ` for ${s.callback_requested_at}` : ""}`,
+        state: "info",
+      };
+
+    case "HUMAN_REVIEW":
+      return { output: `Needs review — no clear commitment${suffix}`, state: "warning" };
+
+    case "UNRESOLVED":
+      return { output: "Unresolved — nobody committed", state: "critical" };
+
+    default:
+      return { output: "Call ended without a usable result.", state: "warning" };
+  }
+}
 
 export function WholesalerDashboard() {
   const [contacts, setContacts] = useState<Contact[] | null>(null);
@@ -75,19 +149,13 @@ export function WholesalerDashboard() {
           }
         } catch {}
         setContacts(merged);
-        // Pre-populate some realistic initial call outputs for seed vendors
+        // Vendors start with no call history. Previously this seeded invented
+        // outcomes ("Stock Confirmed — Dispatch Today") onto the first vendor,
+        // which read on screen exactly like a real CALL-E result.
         setCallStates((prev) => {
           const updated = { ...prev };
-          merged.forEach((c, idx) => {
-            if (!updated[c.id]) {
-              const sample = SAMPLE_OUTPUTS[idx % SAMPLE_OUTPUTS.length];
-              updated[c.id] = {
-                status: idx === 0 ? "completed" : "idle",
-                output: idx === 0 ? sample.output : undefined,
-                outputState: idx === 0 ? sample.state : undefined,
-                timestamp: idx === 0 ? "10 mins ago" : undefined,
-              };
-            }
+          merged.forEach((c) => {
+            if (!updated[c.id]) updated[c.id] = { status: "idle" };
           });
           return updated;
         });
@@ -102,42 +170,48 @@ export function WholesalerDashboard() {
     fetchContacts();
   }, [fetchContacts]);
 
-  const triggerCall = (vendorId: string, vendorName: string) => {
-    // Set status to dialling
+  const triggerCall = async (vendor: Contact) => {
     setCallStates((prev) => ({
       ...prev,
-      [vendorId]: { status: "dialling", output: "Dialling CALL-E Agent..." },
+      [vendor.id]: { status: "dialling", output: "Dialling CALL-E Agent..." },
     }));
 
-    // Step 1: Connected after 1.5s
-    setTimeout(() => {
-      setCallStates((prev) => ({
-        ...prev,
-        [vendorId]: { status: "connected", output: "In Conversation (CALL-E AI Active)..." },
-      }));
-    }, 1500);
+    try {
+      // The request blocks for the length of the real call. The row stays on
+      // "dialling" until it returns — the old code stepped through
+      // connected → extracting on local timers, which showed call progress
+      // that nothing had reported.
+      const result = await apiPost<CallOutcome>("/api/v1/contacts/call", {
+        contactId: vendor.id,
+        orderReference: `ORD-${vendor.id.slice(-4).toUpperCase()}`,
+      });
 
-    // Step 2: Extracting after 3.5s
-    setTimeout(() => {
-      setCallStates((prev) => ({
-        ...prev,
-        [vendorId]: { status: "extracting", output: "Extracting structured commitments..." },
-      }));
-    }, 3500);
+      const { output, state } = describeOutcome(result);
 
-    // Step 3: Complete after 5s
-    setTimeout(() => {
-      const sample = SAMPLE_OUTPUTS[Math.floor(Math.random() * SAMPLE_OUTPUTS.length)];
+      // A mock result is labelled on screen so it can never be read — or
+      // recorded on camera — as something a real supplier actually said.
+      const labelled = result.driver === "mock" ? `${output} [MOCK]` : output;
+
       setCallStates((prev) => ({
         ...prev,
-        [vendorId]: {
+        [vendor.id]: {
           status: "completed",
-          output: sample.output,
-          outputState: sample.state,
+          output: labelled,
+          outputState: state,
           timestamp: "Just now",
         },
       }));
-    }, 5200);
+    } catch (error) {
+      setCallStates((prev) => ({
+        ...prev,
+        [vendor.id]: {
+          status: "completed",
+          output: error instanceof Error ? error.message : "CALL-E call failed",
+          outputState: "critical",
+          timestamp: "Just now",
+        },
+      }));
+    }
   };
 
   const filteredContacts = (contacts ?? []).filter(
@@ -311,7 +385,7 @@ export function WholesalerDashboard() {
                       <Button
                         variant={isCalling ? "ghost" : callState.status === "completed" ? "neutral" : "primary"}
                         size="sm"
-                        onClick={() => triggerCall(vendor.id, vendor.name)}
+                        onClick={() => void triggerCall(vendor)}
                         disabled={isCalling}
                         className="whitespace-nowrap shadow-sm"
                       >

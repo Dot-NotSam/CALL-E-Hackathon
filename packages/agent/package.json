@@ -2,6 +2,10 @@
   "name": "@sentinel/agent",
   "version": "0.1.0",
   "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./coordination": "./coordination.ts"
+  },
   "dependencies": {
     "@langchain/langgraph": "^1.4.12",
     "@langchain/core": "^1.1.48",

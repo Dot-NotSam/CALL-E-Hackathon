@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { isKillSwitchEngaged, resetToSeed, trigger } from "@/lib/mock/store";
+import { createAgentRun, resetToSeed, trigger } from "@/lib/mock/store";
 import { SCENARIOS } from "@/lib/mock/scenarios";
+import { startCoordination } from "@/lib/agent/runtime";
+// The repository switch, not the store's copy — one authority, so the answer
+// this route gives and the one the agent enforces can never disagree.
+import { isKillSwitchEngaged } from "@/lib/db/orders-repository";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +19,7 @@ export async function GET() {
       description,
       expectedOutcome,
     })),
-    killSwitch: isKillSwitchEngaged(),
+    killSwitch: await isKillSwitchEngaged(),
   });
 }
 
@@ -36,7 +40,22 @@ const OrderInput = z.object({
 
 const Body = z.union([
   z.object({ action: z.literal("reset") }),
-  z.object({ scenarioId: z.string(), order: OrderInput }),
+  z.object({
+    scenarioId: z.string(),
+    order: OrderInput,
+    /**
+     * Which driver runs the order.
+     *
+     *   "agent"    — the real LangGraph agent decides and dials through CALL-E.
+     *   "scenario" — replay a fixed script. The dev harness; never the demo.
+     *
+     * Defaults to the agent: the scripted path has to be asked for by name, so
+     * nothing reaches a recording or a deployment on it by accident.
+     */
+    driver: z.enum(["agent", "scenario"]).default("agent"),
+    /** Dev only — use the CALL-E mock driver rather than the real SDK. */
+    useMock: z.boolean().optional(),
+  }),
 ]);
 
 /** POST — start a scenario for an order, or reset to the seeded history. */
@@ -58,7 +77,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, action: "reset" });
   }
 
-  if (isKillSwitchEngaged()) {
+  if (await isKillSwitchEngaged()) {
     return NextResponse.json(
       {
         error: "kill_switch_engaged",
@@ -68,7 +87,26 @@ export async function POST(request: Request) {
     );
   }
 
-  const { scenarioId, order } = parsed.data;
+  const { scenarioId, order, driver, useMock } = parsed.data;
+  const input = { ...order, reference: order.reference.toUpperCase() };
+
+  // ── The agent path — the one that ships ───────────────────────────────────
+  // The order is created, returned immediately, and the graph runs behind it:
+  // a real call takes a minute or more, and the dashboard follows the SSE
+  // stream rather than waiting on this response.
+  if (driver === "agent") {
+    const run = createAgentRun(input);
+
+    void startCoordination(run.order, useMock === undefined ? {} : { useMock });
+
+    return NextResponse.json({
+      orderId: run.order.id,
+      traceId: run.order.traceId,
+      driver: "agent",
+    });
+  }
+
+  // ── The scripted path — dev harness only ──────────────────────────────────
   if (!SCENARIOS.some((s) => s.id === scenarioId)) {
     return NextResponse.json(
       { error: "unknown_scenario", message: `No scenario “${scenarioId}”` },
@@ -76,6 +114,10 @@ export async function POST(request: Request) {
     );
   }
 
-  const run = trigger(scenarioId, { ...order, reference: order.reference.toUpperCase() });
-  return NextResponse.json({ orderId: run.order.id, traceId: run.order.traceId });
+  const run = trigger(scenarioId, input);
+  return NextResponse.json({
+    orderId: run.order.id,
+    traceId: run.order.traceId,
+    driver: "scenario",
+  });
 }

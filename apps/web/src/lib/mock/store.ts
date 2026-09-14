@@ -394,6 +394,52 @@ export function subscribe(run: Run, fn: (event: SentinelEvent) => void): () => v
   return () => run.subscribers.delete(fn);
 }
 
+/* ─── Agent-driven runs ──────────────────────────────────────────────────
+   The scripted path above replays a fixed scenario. The path below hands the
+   order to the real LangGraph agent instead, and the store becomes a sink for
+   whatever the agent decides. Everything else — projection, subscribers, the
+   SSE stream, the board — is unchanged, because the agent emits the same
+   SentinelEvent shapes the scripts do.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Creates an un-scripted run for the agent to drive.
+ * No timers are scheduled: every event arrives from the agent.
+ */
+export function createAgentRun(input: NewOrderInput): Run {
+  seed();
+  store.counter += 1;
+  const order = makeOrder(input, "agent", Date.now());
+  // makeOrder bumps the counter itself, so undo the extra increment above.
+  store.counter -= 1;
+
+  const run: Run = {
+    order,
+    ladder: ladderFor(order.seller.id),
+    emitted: [],
+    followUps: [],
+    finished: false,
+    timers: [],
+    subscribers: new Set(),
+  };
+
+  store.runs.set(order.id, run);
+  return run;
+}
+
+/** Publishes one agent-produced event into a run. */
+export function publishAgentEvent(orderId: string, event: SentinelEvent): void {
+  const run = store.runs.get(orderId);
+  if (!run) return;
+  publish(run, event);
+}
+
+/** Marks an agent-driven run complete once the graph has terminated. */
+export function finishAgentRun(orderId: string): void {
+  const run = store.runs.get(orderId);
+  if (run) run.finished = true;
+}
+
 /** Drop every run and return to the seeded history. */
 export function resetToSeed(): void {
   for (const run of store.runs.values()) run.timers.forEach(clearTimeout);

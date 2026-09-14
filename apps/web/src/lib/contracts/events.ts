@@ -60,7 +60,7 @@ const ContactSchema = z.looseObject({
 });
 
 /** PRD §7.2, as a validator. `next_action` and the two required enums are strict. */
-const WholesaleResultSchema = z.looseObject({
+export const WholesaleResultSchema = z.looseObject({
   contact_reached: z.enum(["yes", "no", "wrong_person", "voicemail", "unknown"]),
   stock_status: z.enum(["confirmed", "partial", "unavailable", "unknown"]),
   confirmed_quantity: z.number().optional(),
