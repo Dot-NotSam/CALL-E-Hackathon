@@ -19,7 +19,13 @@ const noSleep = async () => {};
 function call(
   taskStatus: PollableCall["status"],
   attemptStatus?: CalleAttemptStatus,
-  extra: { failureCode?: string; turns?: { speaker: string; text: string }[] } = {}
+  extra: {
+    failureCode?: string;
+    turns?: { speaker: string; text: string }[];
+    /** Backfilled by CALL-E at completion — never set mid-call. */
+    startedAt?: string | null;
+    providerCallId?: string | null;
+  } = {}
 ): PollableCall {
   return {
     id: "call-1",
@@ -31,6 +37,8 @@ function call(
               {
                 status: attemptStatus,
                 failureCode: extra.failureCode ?? null,
+                startedAt: extra.startedAt ?? null,
+                providerCallId: extra.providerCallId ?? null,
                 transcriptTurns: (extra.turns ?? []).map((t) => ({
                   ...t,
                   offset_seconds: null,
@@ -245,27 +253,102 @@ describe("pollCallToCompletion", () => {
     expect(polls).toBe(1);
   });
 
-  // FR-5.4 — a call may never run unbounded.
-  test("throws CallTimeoutError once the duration ceiling is passed", async () => {
+  // A call may never run unbounded — but the budget starts when the phone
+  // actually rings, not when we handed the task to CALL-E.
+  const dialling = () =>
+    call("in_progress", "in_progress", { startedAt: "2026-09-13T18:56:10Z" });
+
+  test("throws CallTimeoutError once the conversation ceiling is passed", async () => {
+    await expect(
+      pollCallToCompletion("call-1", async () => dialling(), {}, {
+        intervalMs: 0,
+        timeoutMs: 0,
+      })
+    ).rejects.toBeInstanceOf(CallTimeoutError);
+  });
+
+  test("emits a failed state before giving up on timeout", async () => {
+    const states: string[] = [];
+    await pollCallToCompletion("call-1", async () => dialling(), {
+      onState: (s) => states.push(s),
+    }, { intervalMs: 0, timeoutMs: 0 }).catch(() => {});
+
+    expect(states[states.length - 1]).toBe("failed");
+  });
+});
+
+// ─── A call in progress is indistinguishable from a call in the queue ────────
+//
+// OBSERVED (live call 2026-09-14, call_pTAB-O4ueJdAITNenOEA5Q): a 44-turn
+// conversation ran to completion while every poll returned task "queued",
+// attempt "in_progress", startedAt null, providerCallId null, zero turns. The
+// fields only appeared once the task went terminal.
+//
+// These tests exist to stop anyone reintroducing a "has the dial started?"
+// heuristic. There is no such signal; a budget built on one cuts off real
+// calls, and we have discarded two genuine commitments proving it.
+
+describe("polling a call that never looks like it started", () => {
+  test("keeps polling through a queue-shaped call and returns the real result", async () => {
+    let polls = 0;
+
+    const result = await pollCallToCompletion(
+      "call-1",
+      async () => {
+        polls++;
+        // Exactly what CALL-E returned for 90 consecutive polls on 2026-09-14.
+        if (polls <= 90) return call("queued", "in_progress");
+        // …and then, all at once, the whole call.
+        return call("completed", "completed", {
+          startedAt: "2026-09-13T19:12:49Z",
+          providerCallId: "e755290e",
+          turns: [{ speaker: "bot", text: "hello" }],
+        });
+      },
+      {},
+      { intervalMs: 0, timeoutMs: 60_000 }
+    );
+
+    expect(toSentinelCallState(result)).toBe("completed");
+    expect(polls).toBe(91);
+  });
+
+  test("gives up on one overall deadline, not a queue-specific one", async () => {
     await expect(
       pollCallToCompletion(
         "call-1",
-        async () => call("in_progress", "in_progress"),
+        async () => call("queued", "in_progress"),
         {},
         { intervalMs: 0, timeoutMs: 0 }
       )
     ).rejects.toBeInstanceOf(CallTimeoutError);
   });
 
-  test("emits a failed state before giving up on timeout", async () => {
+  test("the timeout message says the call may still be live", async () => {
+    // Not cosmetic: graph.ts matches this substring to decide NOT to escalate.
+    // If the wording changes here, a timeout starts ringing the next contact
+    // while the first one is possibly mid-conversation. Keep them in step.
+    await expect(
+      pollCallToCompletion(
+        "call-1",
+        async () => call("queued", "in_progress"),
+        {},
+        { intervalMs: 0, timeoutMs: 0 }
+      )
+    ).rejects.toThrow(/may still be live/);
+  });
+
+  test("emits failed to the dashboard so the theatre does not hang", async () => {
     const states: string[] = [];
+
     await pollCallToCompletion(
       "call-1",
-      async () => call("in_progress", "in_progress"),
+      async () => call("queued", "in_progress"),
       { onState: (s) => states.push(s) },
       { intervalMs: 0, timeoutMs: 0 }
     ).catch(() => {});
-    expect(states[states.length - 1]).toBe("failed");
+
+    expect(states.at(-1)).toBe("failed");
   });
 });
 

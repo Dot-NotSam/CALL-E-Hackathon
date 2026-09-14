@@ -3,41 +3,95 @@
  * Node: escalate
  * Owner: Aryan
  *
- * Advances the escalation rung and raises urgency framing.
- * Exits to: "select_responder" | "unresolved" (when ladder exhausted)
+ * Advances to the next contact on the supplier's ladder and raises urgency.
+ * Exits to: "select_contact" | "unresolved" (when the ladder is exhausted)
+ *
+ * This node owns the rung cap. `decide` routes here without re-deriving it, so
+ * the cap exists in exactly one place (PRD §18: max 3 rungs).
  */
 
-import type { EscalationState } from "../state";
+import type { CoordinationState } from "../state";
+import { lastStructuredResult } from "../state";
 
-export type EscalateResult = "select_responder" | "unresolved";
+export type EscalateResult = "select_contact" | "unresolved";
 
-export function escalate(state: EscalationState): {
+export interface EscalateOutcome {
   nextNode: EscalateResult;
-  updatedState: Partial<EscalationState>;
-} {
-  const nextRung = state.escalationRung + 1;
+  updatedState: Partial<CoordinationState>;
+  reason: string;
+}
+
+export function escalate(state: CoordinationState): EscalateOutcome {
+  const nextRung = state.rung + 1;
 
   // ── Record the attempt first ──────────────────────────────────────────────
-  // This happens even when the ladder is exhausted: the responder on the final
-  // rung was still called, and the UNRESOLVED alert names everyone tried.
-  const attemptedResponders = state.currentResponder
-    ? [...state.attemptedResponders, state.currentResponder.id]
-    : state.attemptedResponders;
+  // This happens even when the ladder is exhausted: the contact on the final
+  // rung was still called, and the UNRESOLVED alert must name everyone tried.
+  const attemptedContacts = state.currentContact
+    ? [...state.attemptedContacts, state.currentContact.id]
+    : state.attemptedContacts;
 
-  // ── Rung cap check ────────────────────────────────────────────────────────
+  const why = escalationReason(state);
+
+  // ── Rung cap ──────────────────────────────────────────────────────────────
   if (nextRung > state.maxRungs) {
     return {
       nextNode: "unresolved",
-      updatedState: { attemptedResponders },
+      updatedState: { attemptedContacts },
+      reason:
+        `${why} Rung cap reached (${state.rung}/${state.maxRungs}) — no contacts left.`,
     };
   }
 
   return {
-    nextNode: "select_responder",
+    nextNode: "select_contact",
     updatedState: {
-      escalationRung: nextRung,
-      attemptedResponders,
-      currentResponder: null,  // cleared — select_responder will fill it
+      rung: nextRung,
+      attemptedContacts,
+      // Cleared so select_contact must choose afresh. Leaving the previous
+      // contact here would let a failure re-dial the same person.
+      currentContact: null,
     },
+    reason: `${why} Advancing to rung ${nextRung} of ${state.maxRungs}.`,
   };
+}
+
+/**
+ * Why this order is escalating, in the supplier's own terms where we have them.
+ * This text lands on the `order.escalated` event, which is what makes the
+ * ladder animation on the dashboard legible rather than decorative.
+ */
+function escalationReason(state: CoordinationState): string {
+  if (state.callError) {
+    return `Call to ${contactName(state)} failed: ${state.callError}.`;
+  }
+
+  const result = lastStructuredResult(state);
+  if (!result) {
+    return `No usable result from ${contactName(state)}.`;
+  }
+
+  switch (result.contact_reached) {
+    case "no":
+      return `${contactName(state)} did not answer.`;
+    case "voicemail":
+      return `Reached voicemail for ${contactName(state)}; no details were left.`;
+    case "wrong_person":
+      return `Someone other than ${contactName(state)} answered; no details were disclosed.`;
+    default:
+      break;
+  }
+
+  if (result.stock_status === "unavailable") {
+    return (
+      `${contactName(state)} cannot supply` +
+      (result.delay_reason ? `: ${result.delay_reason}` : ".")
+    );
+  }
+
+  return `${contactName(state)} produced no usable commitment.`;
+}
+
+function contactName(state: CoordinationState): string {
+  return state.currentContact?.name ?? "the contact";
 }

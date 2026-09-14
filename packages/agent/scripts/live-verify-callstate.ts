@@ -1,19 +1,30 @@
+/* istanbul ignore file -- @preserve
+ *
+ * Excluded from coverage deliberately. This is an operator probe, not library
+ * code: every line of it places a REAL call to a consented number, so covering
+ * it means spending a credit and ringing someone's phone. Counting it in the
+ * denominator would only invite a fake test that imports the module and
+ * asserts nothing. It is verified by running it — see the log entries in
+ * docs/CALLE_TESTING_LOG.md.
+ */
+
 /**
  * packages/agent/scripts/live-verify-callstate.ts
- * ONE live call, through the real agent path, to verify FR-5.2.
+ * ONE live call, through the real agent path, to verify FR-4.2 and FR-4.3.
  *
  * ⚠️  THIS RINGS A REAL PHONE AND SPENDS ONE CREDIT.
  *
- * What it verifies (both currently inferred from CALL-E's OpenAPI schema
- * rather than observed):
- *   1. create() + poll emits real queued → dialling → in_conversation →
- *      completed transitions — the data Vishal's Live Call Theatre renders.
- *   2. The real shape of attempt.status / failureCode, so the mapping in
- *      packages/calle/progress.ts is grounded in fact.
+ * What it verifies:
+ *   1. create() + poll emits real queued → dialling → … → completed
+ *      transitions — the data the order call screen renders.
+ *   2. That the WHOLESALE result schema extracts correctly from live speech.
+ *      The v1 incident schema was confirmed on 2026-09-08 (testing log P-003);
+ *      the wholesale schema has NOT been through a live call, and quantities
+ *      and dates are harder to extract than a single ETA number.
  *
  * Safety rails, all belt-and-braces so this cannot run away:
  *   - roster contains exactly ONE consented number
- *   - maxRungs = 1 and maxCallsPerIncident = 1
+ *   - maxRungs = 1 and maxCallsPerOrder = 1, so it cannot escalate
  *   - every raw CALL-E payload is written to docs/live-call-raw.json
  *
  * Run:  node dist-probe/packages/agent/scripts/live-verify-callstate.js
@@ -21,40 +32,63 @@
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { runEscalationAgent } from "../index";
+import { runCoordinationAgent } from "../index";
 import type { AgentDependencies } from "../graph";
-import type { EscalationContext, Responder } from "../../types";
+import type { WholesaleCoordinationContext, Contact } from "../../types";
 
 // ─── The one consented number ────────────────────────────────────────────────
 // Never hardcode a number here — this file is committed. Set CALLE_TEST_PHONE
 // in .env, and only ever to a team member who has agreed to receive test calls.
-const CONSENTED_PHONE = process.env.CALLE_TEST_PHONE ?? "";
+//
+// argv[2] overrides it for a one-off call to a second consented roster member,
+// so testing another number does not mean editing .env and forgetting to put it
+// back. Passing a number here is still a consent assertion (FR-7.2): the person
+// holding it has agreed to receive test calls. It is not a way around the rule.
+const CONSENTED_PHONE = process.argv[2] ?? process.env.CALLE_TEST_PHONE ?? "";
 
-const RESPONDER: Responder = {
-  id: "R-ARYAN",
-  name: "Aryan",
-  role: "Refrigeration Technician",
+// The agent greets this name and refuses to discuss the order with anyone else,
+// so it has to match whoever actually answers argv[2].
+const CONSENTED_NAME = process.argv[3] ?? "Aryan";
+
+const CONTACT: Contact = {
+  id: "ct-live-probe",
+  organizationId: "org-metro-supply",
+  name: CONSENTED_NAME,
+  role: "Dispatch Lead",
   phoneE164: CONSENTED_PHONE,
-  skills: ["refrigeration"],
-  shiftStart: "00:00",
-  shiftEnd: "23:59",
-  zone: "Zone A",
-  ladderPriority: 1,
+  productCategories: ["medical-supplies"],
+  region: "West",
+  workingHours: { start: "00:00", end: "23:59", timezone: "Asia/Kolkata" },
+  escalationPriority: 1,
   preferredLanguage: "en-IN",
+  consentAt: new Date().toISOString(),
   cooldownUntil: null,
 };
 
-const CONTEXT: EscalationContext = {
-  incidentId: `INC-LIVE-${Date.now()}`,
+const CONTEXT: WholesaleCoordinationContext = {
+  orderId: `CR-LIVE-${Date.now()}`,
   traceId: `trace-live-${Date.now()}`,
-  severity: "CRITICAL",
-  safeWindowMinutes: 90,
-  consequence: "inventory is at risk",
-  escalationRung: 1,
-  facility: { id: "northgate", name: "Northgate Facility", timezone: "Asia/Kolkata" },
-  asset: { id: "CS-04", type: "cold-storage", location: "Zone A" },
-  reading: { metric: "temperature_c", value: 12.4, unit: "C", threshold: 8 },
-  responder: RESPONDER,
+  reference: "ORD-482",
+  urgency: "URGENT",
+  requiredBy: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+  buyer: { id: "org-northgate", name: "Northgate Distributors", role: "DISTRIBUTOR" },
+  seller: { id: "org-metro-supply", name: "Metro Supply Co.", role: "WHOLESALER" },
+  item: {
+    sku: "MED-TS-CASE",
+    description: "temperature-sensitive medical supplies",
+    unit: "cases",
+    requestedQuantity: 200,
+    confirmedQuantity: null,
+    remainingQuantity: null,
+    unitPrice: 1850,
+    currency: "INR",
+  },
+  trigger: {
+    type: "INVENTORY",
+    summary: "Available stock fell below the reorder point.",
+    receivedAt: new Date().toISOString(),
+  },
+  rung: 1,
 };
 
 // ─── Raw payload capture ─────────────────────────────────────────────────────
@@ -85,7 +119,7 @@ async function instrumentSdk() {
   };
 }
 
-// ─── Go ───────────────────────────────────────────────────────────────────────
+// ─── Go ──────────────────────────────────────────────────────────────────────
 
 async function main() {
   if (process.env.CALLE_USE_MOCK === "true") {
@@ -96,7 +130,7 @@ async function main() {
   if (!CONSENTED_PHONE) {
     console.error(
       "CALLE_TEST_PHONE is not set. Refusing to dial.\n" +
-      "Set it in .env to a consented team member's number (Rule 3)."
+      "Set it in .env to a consented team member's number (FR-7.2)."
     );
     process.exit(1);
   }
@@ -106,46 +140,51 @@ async function main() {
   console.log("\n  LIVE CALL — a real phone will ring and one credit is spent.");
   console.log(`  Calling ${CONSENTED_PHONE} (consented, roster of one).`);
   console.log("  Caps: 1 rung, 1 call. It cannot escalate.\n");
-  console.log("  Pick up. You are a refrigeration technician. Try saying you're");
-  console.log("  on another job, then give a number of minutes when pressed.\n");
+  console.log("  Pick up. You are a dispatch lead at Metro Supply Co.");
+  console.log("  Try: \"we only have 120 cases ready today\" — then give a time");
+  console.log("  for the remaining 80 when the agent asks.\n");
 
   const deps: AgentDependencies = {
-    getRoster: async () => [RESPONDER],
-    requiredSkill: "refrigeration",
-    requiredZone: "Zone A",
+    getContacts: async () => [CONTACT],
+    getOpenOrders: async () => [],
+    requiredCategory: "medical-supplies",
 
     isKillSwitchActive: async () => false,
-    maxCallsPerIncident: 1,
+    maxCallsPerOrder: 1,
 
     persistCall: async ({ status, confidence }) => {
       console.log(`\n  [persist] status=${status} confidence=${confidence.score}`);
       return { callId: "live-call-1" };
     },
 
-    resolveCallbacks: {
-      persistOutcome: async () => {},
-      notifyManager: async () => {},
-      emitSSE: () => {},
+    confirmCallbacks: {
+      updateOrder: async (outcome) =>
+        console.log(`  [order] ${outcome.status} — ${outcome.summary}`),
+      scheduleFollowUp: async (f) =>
+        console.log(`  [follow-up] ${f.kind} due ${f.dueAt} — ${f.note}`),
     },
-    unresolvedCallbacks: {
-      persistOutcome: async () => {},
-      alertFacilityManager: async () => {},
-      emitSSE: () => {},
-    },
-    verifyCallbacks: {
-      scheduleVerificationJob: async ({ runAt }) =>
-        console.log(`  [queue] verification would run at ${runAt}`),
-      arrangeBackup: async ({ reason }) => console.log(`  [backup] ${reason}`),
-      emitSSE: () => {},
-    },
-    humanReviewCallbacks: {
-      parkIncident: async ({ reason }) => console.log(`  [review] ${reason}`),
-      alertOperator: async () => {},
-      emitSSE: () => {},
+    approvalCallbacks: {
+      requestApproval: async ({ approval }) =>
+        console.log(`  [approval] ${approval.reason}`),
+      updateOrder: async (outcome) =>
+        console.log(`  [order] ${outcome.status} — ${outcome.summary}`),
     },
     scheduleCallbackCallbacks: {
-      scheduleCallbackJob: async () => {},
-      emitSSE: () => {},
+      scheduleCallbackJob: async ({ callbackAt }) =>
+        console.log(`  [queue] callback at ${callbackAt}`),
+      scheduleFollowUp: async (f) => console.log(`  [follow-up] ${f.kind} due ${f.dueAt}`),
+      updateOrder: async (outcome) =>
+        console.log(`  [order] ${outcome.status} — ${outcome.summary}`),
+    },
+    humanReviewCallbacks: {
+      parkOrder: async ({ reason }) => console.log(`  [review] ${reason}`),
+      updateOrder: async (outcome) =>
+        console.log(`  [order] ${outcome.status} — ${outcome.summary}`),
+    },
+    unresolvedCallbacks: {
+      updateOrder: async (outcome) =>
+        console.log(`  [order] ${outcome.status} — ${outcome.summary}`),
+      alertOperations: async ({ reason }) => console.log(`  [ALERT] ${reason}`),
     },
 
     emitSSECallState: ({ state }) => {
@@ -157,23 +196,36 @@ async function main() {
       transcript.push({ speaker, text });
       console.log(`  ${speaker}: ${text}`);
     },
+    emitSSEResultExtracted: ({ structured, confidence }) =>
+      console.log(
+        `  [extracted] next_action=${structured.next_action} confidence=${confidence.score}`
+      ),
 
     emitAgentEvent: ({ node, decision, reason }) =>
       console.log(`[${node}] ${decision} — ${reason}`),
-    emitSSEPlanComposed: () => {},
-    emitSSEResponderSelected: ({ responder }) =>
-      console.log(`  [responder] ${responder.name}`),
+    emitSSEOrderSuppressed: ({ reason }) => console.log(`  [suppressed] ${reason}`),
+    emitSSEPlanComposed: ({ summary }) => console.log(`  [plan] ${summary}`),
+    emitSSEContactSelected: ({ contact }) => console.log(`  [contact] ${contact.name}`),
+    emitSSEOrderEscalated: ({ toRung, reason }) =>
+      console.log(`  [escalate] → rung ${toRung}: ${reason}`),
 
-    incidentOpenedAt: new Date(),
     useMock: false,
   };
 
-  const final = await runEscalationAgent(CONTEXT, deps);
+  const final = await runCoordinationAgent(CONTEXT, deps, 1);
 
-  // ── Findings ───────────────────────────────────────────────────────────────
+  // ── Findings ─────────────────────────────────────────────────────────────
   // Relative to the repo root, not __dirname — the compiled output lands at a
   // different depth than the source, and this file has already moved once.
-  const outPath = join(process.cwd(), "docs", "live-call-raw.json");
+  //
+  // Named per call, NOT a fixed live-call-raw.json. That file was overwritten
+  // by each successive probe, so the payloads the testing log cites as
+  // "preserved verbatim" for F-001…F-004 were silently destroyed by call #9,
+  // and #9's by #10. These are the only evidence we have for survey findings
+  // and we cannot re-run a call to get them back — each one costs a credit and
+  // rings a person.
+  const callId = final.callHistory.at(-1)?.callId ?? `no-call-${Date.now()}`;
+  const outPath = join(process.cwd(), "docs", `live-call-raw.${callId}.json`);
   writeFileSync(
     outPath,
     JSON.stringify({ stateTransitions, transcript, rawPolls }, null, 2)

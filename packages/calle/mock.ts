@@ -8,197 +8,237 @@
  *     - The deployed app
  *     - Any test fixture labelled as real output
  *
- * It satisfies the identical interface as the real SDK so all
- * 5 developers can build in parallel without spending live calls.
+ * It satisfies the identical interface as the real SDK (FR-4.5) so five people
+ * can build in parallel without spending live calls.
+ *
+ * Scenario names match the dashboard's replay scenarios in
+ * `apps/web/src/lib/mock/scenarios/` one for one, so a scenario triggered in
+ * the simulator and a scenario driven through the agent tell the same story.
  *
  * Usage:
  *   import { mockCalle } from "../calle/mock";
- *   // use mockCalle.calls.createAndWait() exactly like the real client
+ *   await mockCalle.runCall({ task, resultSchema }, "partial_stock", hooks);
  */
 
-import type { EscalationStructuredResult, CallStatus } from "../types";
+import type { WholesaleResult, CallState } from "../types";
 import type { CallProgressHooks } from "./progress";
 
 export type MockScenario =
-  | "accept_immediately"      // technician says yes, ETA 20 min
-  | "accept_after_pushback"   // "I'm busy" → negotiated to 40 min
-  | "hard_refusal"            // flat no, on another job
-  | "no_answer"               // call not picked up
-  | "voicemail"               // reached voicemail
-  | "ambiguous"               // vague answer, low confidence
-  | "callback_requested"      // asks to be called back at specific time
-  | "late_eta"                // ETA beyond safe window
-  | "wrong_person"            // someone else picks up
-  | "gatekeeper"              // IVR / switchboard answers, not a person
-  | "call_drops";             // call disconnects mid-conversation
+  /** The hero path: 120 of 200 today, the rest tomorrow morning. */
+  | "partial_stock"
+  /** Full quantity confirmed, dispatching today. */
+  | "full_confirmation"
+  /** Supplier quotes a higher price — must go to a human (FR-5.3). */
+  | "price_change"
+  /** Nobody picks up. Confidence 0.0 by construction — nobody spoke. */
+  | "no_answer"
+  /** Contact asks to be called back at a specific time. */
+  | "callback_requested"
+  /** "Should be fine" — vague after a second ask. Low confidence. */
+  | "vague_answer"
+  /** Supplier cannot supply at all. */
+  | "unavailable"
+  /** Voicemail picked up. Minimal message left, no order details. */
+  | "voicemail"
+  /** Someone other than the named contact answered. Details withheld. */
+  | "wrong_person"
+  /** An automated switchboard answered. The agent does not navigate menus. */
+  | "gatekeeper"
+  /** The line dropped mid-conversation. */
+  | "call_drops";
 
 interface MockCallResult {
   status: string;
   taskCompleted: boolean;
   completionConfidence: { score: number; label: string };
   evidence: string[];
-  structuredResult: EscalationStructuredResult;
+  structuredResult: WholesaleResult;
 }
 
+/**
+ * Fixture results. Every one of these is SYNTHETIC (Rule 8) — none is real
+ * CALL-E output, and the transcripts below are prefixed [MOCK] so they can
+ * never be mistaken for a real call in a screenshot.
+ *
+ * Quantities assume the hero order: 200 cases at 1850 INR.
+ */
 const SCENARIOS: Record<MockScenario, MockCallResult> = {
-  accept_immediately: {
-    status: "completed",
-    taskCompleted: true,
-    completionConfidence: { score: 0.95, label: "high" },
-    evidence: [
-      "The technician confirmed availability immediately.",
-      "Stated ETA of 20 minutes explicitly.",
-    ],
-    structuredResult: {
-      responder_available: "yes",
-      eta_minutes: 20,
-      acknowledged_severity: true,
-      requires_backup: false,
-      requires_parts: false,
-      decline_reason: "none",
-      verbatim_commitment: "Yes, I can be there in 20 minutes.",
-      next_action: "SCHEDULE_VERIFICATION_CALL",
-    },
-  },
-
-  accept_after_pushback: {
-    status: "completed",
-    taskCompleted: true,
-    completionConfidence: { score: 0.92, label: "high" },
-    evidence: [
-      "Initially indicated being on another job.",
-      "When pressed for ETA, committed to 40 minutes.",
-    ],
-    structuredResult: {
-      responder_available: "conditional",
-      eta_minutes: 40,
-      acknowledged_severity: true,
-      requires_backup: false,
-      requires_parts: false,
-      decline_reason: "none",
-      verbatim_commitment: "Give me about forty minutes.",
-      next_action: "SCHEDULE_VERIFICATION_CALL",
-    },
-  },
-
-  hard_refusal: {
+  partial_stock: {
     status: "completed",
     taskCompleted: true,
     completionConfidence: { score: 0.91, label: "high" },
     evidence: [
-      "Technician clearly stated they are on another job.",
-      "Declined to provide an ETA.",
+      "The contact stated 120 cases were ready today.",
+      "When asked about the balance, they committed to the remaining 80 tomorrow morning.",
     ],
     structuredResult: {
-      responder_available: "no",
-      acknowledged_severity: true,
-      requires_backup: false,
-      requires_parts: false,
-      decline_reason: "on_another_job",
-      verbatim_commitment: "I'm on another job, I can't come.",
-      next_action: "ESCALATE_NEXT_RUNG",
+      contact_reached: "yes",
+      stock_status: "partial",
+      confirmed_quantity: 120,
+      remaining_quantity: 80,
+      unit_price: 1850,
+      currency: "INR",
+      dispatch_date: "2026-09-13T11:00:00.000Z",
+      delivery_eta: "tomorrow morning for the balance",
+      verbatim_commitment: "Yes, 120 today and the remaining 80 tomorrow morning.",
+      next_action: "PARTIAL_CONFIRMATION",
+    },
+  },
+
+  full_confirmation: {
+    status: "completed",
+    taskCompleted: true,
+    completionConfidence: { score: 0.94, label: "high" },
+    evidence: [
+      "The contact confirmed all 200 cases were in stock.",
+      "Dispatch was committed for today's evening run.",
+    ],
+    structuredResult: {
+      contact_reached: "yes",
+      stock_status: "confirmed",
+      confirmed_quantity: 200,
+      remaining_quantity: 0,
+      unit_price: 1850,
+      currency: "INR",
+      dispatch_date: "2026-09-13T12:30:00.000Z",
+      delivery_eta: "tomorrow by noon",
+      verbatim_commitment: "All 200 are here, they'll go out on this evening's run.",
+      next_action: "CONFIRM_ORDER",
+    },
+  },
+
+  price_change: {
+    status: "completed",
+    taskCompleted: true,
+    completionConfidence: { score: 0.89, label: "high" },
+    evidence: [
+      "The contact quoted 2050 per case against the order's 1850.",
+      "The agent recorded the new price and did not accept it.",
+      "Stock was confirmed available at the revised price.",
+    ],
+    structuredResult: {
+      contact_reached: "yes",
+      stock_status: "confirmed",
+      confirmed_quantity: 200,
+      unit_price: 2050,
+      currency: "INR",
+      dispatch_date: "2026-09-13T12:30:00.000Z",
+      requires_approval: true,
+      verbatim_commitment: "We can do all 200, but it's 2050 a case now, not 1850.",
+      next_action: "REQUEST_APPROVAL",
     },
   },
 
   no_answer: {
     status: "no_answer",
     taskCompleted: false,
+    // 0.0 by construction: nobody spoke, so there is nothing to be confident
+    // about. This is exactly why low confidence must not block escalation.
     completionConfidence: { score: 0.0, label: "none" },
-    evidence: ["Call was not answered."],
+    evidence: ["The call was not answered."],
     structuredResult: {
-      responder_available: "unknown",
-      acknowledged_severity: false,
-      next_action: "ESCALATE_NEXT_RUNG",
-    },
-  },
-
-  voicemail: {
-    status: "completed",
-    taskCompleted: false,
-    completionConfidence: { score: 0.1, label: "low" },
-    evidence: ["Reached voicemail. Left message with asset ID and callback request."],
-    structuredResult: {
-      responder_available: "unknown",
-      acknowledged_severity: false,
-      next_action: "ESCALATE_NEXT_RUNG",
-    },
-  },
-
-  ambiguous: {
-    status: "completed",
-    taskCompleted: false,
-    completionConfidence: { score: 0.55, label: "low" },
-    evidence: [
-      "Respondent gave vague answers.",
-      "Said 'soon' but would not commit to a number.",
-    ],
-    structuredResult: {
-      responder_available: "unknown",
-      acknowledged_severity: false,
-      next_action: "HUMAN_REVIEW",
+      contact_reached: "no",
+      stock_status: "unknown",
+      next_action: "ESCALATE_NEXT_CONTACT",
     },
   },
 
   callback_requested: {
     status: "completed",
     taskCompleted: false,
-    completionConfidence: { score: 0.82, label: "medium" },
-    evidence: ["Technician asked to be called back in 30 minutes."],
+    completionConfidence: { score: 0.84, label: "medium" },
+    evidence: [
+      "The contact said they were on the floor and asked to be called at four.",
+      "The agent confirmed the callback time before ending.",
+    ],
     structuredResult: {
-      responder_available: "conditional",
-      acknowledged_severity: true,
-      requires_backup: false,
-      decline_reason: "none",
-      callback_requested_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-      verbatim_commitment: "Call me back in half an hour.",
+      contact_reached: "yes",
+      stock_status: "unknown",
+      callback_requested_at: "2026-09-13T10:30:00.000Z",
+      verbatim_commitment: "I'm on the floor right now — call me at four.",
       next_action: "SCHEDULE_CALLBACK",
     },
   },
 
-  late_eta: {
+  vague_answer: {
+    status: "completed",
+    taskCompleted: false,
+    // Deliberately below HUMAN_REVIEW_THRESHOLD while next_action is a CLOSING
+    // action. This is the fixture that proves the confidence rule wins.
+    completionConfidence: { score: 0.58, label: "low" },
+    evidence: [
+      "The contact said stock 'should be fine' without confirming a quantity.",
+      "Asked a second time for a concrete date, they said 'sometime this week'.",
+    ],
+    structuredResult: {
+      contact_reached: "yes",
+      stock_status: "unknown",
+      verbatim_commitment: "Should be fine, we'll get it out sometime this week.",
+      next_action: "CONFIRM_ORDER",
+    },
+  },
+
+  unavailable: {
     status: "completed",
     taskCompleted: true,
     completionConfidence: { score: 0.88, label: "high" },
     evidence: [
-      "Technician committed to attending.",
-      "ETA of 120 minutes stated — exceeds safe window.",
+      "The contact stated they have no stock of this SKU.",
+      "They gave a restocking date beyond the buyer's required date.",
     ],
     structuredResult: {
-      responder_available: "conditional",
-      eta_minutes: 120,
-      acknowledged_severity: true,
-      requires_backup: true,
-      requires_parts: false,
-      decline_reason: "none",
-      verbatim_commitment: "I can be there in two hours.",
-      next_action: "SCHEDULE_VERIFICATION_CALL",
+      contact_reached: "yes",
+      stock_status: "unavailable",
+      confirmed_quantity: 0,
+      remaining_quantity: 200,
+      delay_reason: "Out of stock until the next shipment lands next week.",
+      verbatim_commitment: "We're out entirely, nothing until next week's shipment.",
+      next_action: "ESCALATE_NEXT_CONTACT",
+    },
+  },
+
+  voicemail: {
+    status: "completed",
+    taskCompleted: false,
+    completionConfidence: { score: 0.12, label: "low" },
+    evidence: [
+      "Voicemail answered. A minimal callback message was left.",
+      "No order reference, quantity or price was disclosed on the recording.",
+    ],
+    structuredResult: {
+      contact_reached: "voicemail",
+      stock_status: "unknown",
+      next_action: "ESCALATE_NEXT_CONTACT",
     },
   },
 
   wrong_person: {
     status: "completed",
     taskCompleted: false,
-    completionConfidence: { score: 0.3, label: "low" },
-    evidence: ["Person who answered did not identify as the expected responder."],
+    completionConfidence: { score: 0.31, label: "low" },
+    evidence: [
+      "The person who answered was not the named contact.",
+      "The agent asked only whether the contact was reachable and disclosed nothing.",
+    ],
     structuredResult: {
-      responder_available: "unknown",
-      acknowledged_severity: false,
-      next_action: "ESCALATE_NEXT_RUNG",
+      contact_reached: "wrong_person",
+      stock_status: "unknown",
+      next_action: "ESCALATE_NEXT_CONTACT",
     },
   },
 
   gatekeeper: {
     status: "completed",
     taskCompleted: false,
-    completionConfidence: { score: 0.25, label: "low" },
+    completionConfidence: { score: 0.22, label: "low" },
     evidence: [
       "An automated switchboard answered and offered a menu of options.",
-      "No human respondent was reached. The agent did not navigate the menu.",
+      "No human was reached. The agent did not navigate the menu.",
     ],
     structuredResult: {
-      responder_available: "unknown",
-      acknowledged_severity: false,
-      next_action: "ESCALATE_NEXT_RUNG",
+      contact_reached: "no",
+      stock_status: "unknown",
+      next_action: "ESCALATE_NEXT_CONTACT",
     },
   },
 
@@ -206,11 +246,11 @@ const SCENARIOS: Record<MockScenario, MockCallResult> = {
     status: "failed",
     taskCompleted: false,
     completionConfidence: { score: 0.0, label: "none" },
-    evidence: ["Call dropped mid-conversation."],
+    evidence: ["The call dropped mid-conversation."],
     structuredResult: {
-      responder_available: "unknown",
-      acknowledged_severity: false,
-      next_action: "ESCALATE_NEXT_RUNG",
+      contact_reached: "unknown",
+      stock_status: "unknown",
+      next_action: "ESCALATE_NEXT_CONTACT",
     },
   },
 };
@@ -235,56 +275,93 @@ const SCENARIOS: Record<MockScenario, MockCallResult> = {
  * sequence while developing those components — but do not ship a UI that
  * depends on it.
  */
-const OBSERVED_TALKING: CallStatus[] = ["queued", "dialling", "extracting", "completed"];
-const OPTIMISTIC_TALKING: CallStatus[] = [
+const OBSERVED_TALKING: CallState[] = ["queued", "dialling", "extracting", "completed"];
+const OPTIMISTIC_TALKING: CallState[] = [
   "queued", "dialling", "connected", "in_conversation", "extracting", "completed",
 ];
 
-function talkingSequence(): CallStatus[] {
+function talkingSequence(): CallState[] {
   return process.env.SENTINEL_MOCK_OPTIMISTIC === "true"
     ? OPTIMISTIC_TALKING
     : OBSERVED_TALKING;
 }
 
-const STATE_SEQUENCES: Record<MockScenario, () => CallStatus[]> = {
-  accept_immediately:    talkingSequence,
-  accept_after_pushback: talkingSequence,
-  hard_refusal:          talkingSequence,
-  callback_requested:    talkingSequence,
-  late_eta:              talkingSequence,
-  ambiguous:             talkingSequence,
-  wrong_person:          talkingSequence,
-  voicemail:             talkingSequence,
-  gatekeeper:            talkingSequence,
+const STATE_SEQUENCES: Record<MockScenario, () => CallState[]> = {
+  partial_stock:      talkingSequence,
+  full_confirmation:  talkingSequence,
+  price_change:       talkingSequence,
+  callback_requested: talkingSequence,
+  vague_answer:       talkingSequence,
+  unavailable:        talkingSequence,
+  voicemail:          talkingSequence,
+  wrong_person:       talkingSequence,
+  gatekeeper:         talkingSequence,
   // SIP 480/486 and friends — observed on a real call (F-009).
-  no_answer:             () => ["queued", "dialling", "no_answer"],
-  call_drops:            () => ["queued", "dialling", "failed"],
+  no_answer:          () => ["queued", "dialling", "no_answer"],
+  call_drops:         () => ["queued", "dialling", "failed"],
 };
 
 /**
- * Illustrative transcript for the hero scenario. Clearly synthetic — this is a
- * dev fixture and must never be presented as a real CALL-E transcript
- * (CLAUDE.md Rule 8).
+ * Illustrative transcripts. Clearly synthetic — every line is [MOCK]-prefixed
+ * because these are dev fixtures and must never be presented as real CALL-E
+ * transcripts (Rule 8).
+ *
+ * The partial_stock exchange is the PRD §4.1 hero dialogue.
  */
-const MOCK_TRANSCRIPTS: Partial<Record<MockScenario, { speaker: "AGENT" | "HUMAN"; text: string }[]>> = {
-  accept_after_pushback: [
-    { speaker: "AGENT", text: "[MOCK] This is the automated operations line for Northgate Facility." },
-    { speaker: "HUMAN", text: "[MOCK] I'm on another job in Sector 7 right now." },
-    { speaker: "AGENT", text: "[MOCK] Understood. What time could you realistically reach Northgate?" },
-    { speaker: "HUMAN", text: "[MOCK] Give me about forty minutes." },
-    { speaker: "AGENT", text: "[MOCK] Logging you as confirmed with an ETA of forty minutes." },
+const MOCK_TRANSCRIPTS: Partial<
+  Record<MockScenario, { speaker: "AGENT" | "HUMAN"; text: string }[]>
+> = {
+  partial_stock: [
+    // The identity exchange leads every scenario because the real prompt now
+    // opens with it, and the dashboard renders these transcripts. A mock that
+    // skips it would show reviewers a call the agent no longer makes.
+    { speaker: "AGENT", text: "[MOCK] This is the automated operations line for Northgate Distributors. Am I speaking with Rajesh Iyer?" },
+    { speaker: "HUMAN", text: "[MOCK] Yes, this is Rajesh." },
+    { speaker: "AGENT", text: "[MOCK] Thank you. I'm calling about order 482 for 200 cases of medical supplies. Can Metro Supply confirm the available quantity and dispatch date?" },
+    { speaker: "HUMAN", text: "[MOCK] We only have 120 cases ready today." },
+    { speaker: "AGENT", text: "[MOCK] Thank you. Can you dispatch the 120 cases today and confirm when the remaining 80 will be available?" },
+    { speaker: "HUMAN", text: "[MOCK] Yes, 120 today and the remaining 80 tomorrow morning." },
+    { speaker: "AGENT", text: "[MOCK] So that I record this correctly: 120 cases dispatching today, 80 tomorrow morning, against order 482. Is that right?" },
+    { speaker: "HUMAN", text: "[MOCK] That's right." },
+  ],
+
+  price_change: [
+    { speaker: "AGENT", text: "[MOCK] This is the automated operations line for Northgate Distributors. Am I speaking with Rajesh Iyer?" },
+    { speaker: "HUMAN", text: "[MOCK] Speaking." },
+    { speaker: "AGENT", text: "[MOCK] Thank you. I'm calling about order 482 for 200 cases." },
+    { speaker: "HUMAN", text: "[MOCK] We can do all 200, but it's 2050 a case now, not 1850." },
+    { speaker: "AGENT", text: "[MOCK] Thank you, I've noted 2050 per case. That is a change from our order, so it needs approval on our side before I can confirm. Can you still reserve the stock while that is checked?" },
+    { speaker: "HUMAN", text: "[MOCK] Sure, I'll hold them until end of day." },
+  ],
+
+  // Third-party protection, shown rather than asserted. Note what is NOT in
+  // these lines: no order reference, no product, no quantity, no price. The
+  // agent ends the call knowing less than it started with, which is correct.
+  wrong_person: [
+    { speaker: "AGENT", text: "[MOCK] This is the automated operations line for Northgate Distributors. Am I speaking with Rajesh Iyer?" },
+    { speaker: "HUMAN", text: "[MOCK] No, he's not at this desk. What's it regarding?" },
+    { speaker: "AGENT", text: "[MOCK] I'm trying to reach Rajesh Iyer at Metro Supply Co. Is this the right number, and when is he available?" },
+    { speaker: "HUMAN", text: "[MOCK] Try after four. Who did you say is calling?" },
+    { speaker: "AGENT", text: "[MOCK] Thank you, I'll call back after four." },
+  ],
+
+  vague_answer: [
+    { speaker: "AGENT", text: "[MOCK] Can you confirm you have 200 cases available?" },
+    { speaker: "HUMAN", text: "[MOCK] Yeah, should be fine." },
+    { speaker: "AGENT", text: "[MOCK] Just so I record it correctly — is that dispatching today, tomorrow, or later this week?" },
+    { speaker: "HUMAN", text: "[MOCK] We'll get it out sometime this week." },
   ],
 };
 
 /**
  * Simulates placing a call and following it to completion, emitting the same
- * progress hooks the real driver does (FR-5.2).
+ * progress hooks the real driver does (FR-4.3).
  *
  * `delayMs` is the total simulated call duration, spread across the states.
  */
 async function runCall(
   _params: { task: string; resultSchema: unknown },
-  scenario: MockScenario = "accept_after_pushback",
+  scenario: MockScenario = "partial_stock",
   hooks: CallProgressHooks = {},
   delayMs = 1500
 ): Promise<MockCallResult> {
@@ -300,7 +377,7 @@ async function runCall(
   // Under SENTINEL_MOCK_OPTIMISTIC they stream at `in_conversation` instead,
   // for developing a UI against a future streaming API.
   const optimistic = process.env.SENTINEL_MOCK_OPTIMISTIC === "true";
-  const emitTurnsAt: CallStatus = optimistic ? "in_conversation" : "extracting";
+  const emitTurnsAt: CallState = optimistic ? "in_conversation" : "extracting";
 
   for (const state of states) {
     if (perState > 0) await new Promise((res) => setTimeout(res, perState));
@@ -322,8 +399,8 @@ async function runCall(
  */
 async function createAndWait(
   params: { task: string; resultSchema: unknown },
-  scenario: MockScenario = "accept_after_pushback",
-  delayMs = 1500   // simulate call duration
+  scenario: MockScenario = "partial_stock",
+  delayMs = 1500
 ): Promise<MockCallResult> {
   return runCall(params, scenario, {}, delayMs);
 }
@@ -333,6 +410,6 @@ export const mockCalle = {
   calls: {
     createAndWait,
   },
-  _scenarios: SCENARIOS,       // expose for tests
+  _scenarios: SCENARIOS,        // exposed for tests
   _stateSequences: STATE_SEQUENCES,
 };

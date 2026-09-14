@@ -1,211 +1,191 @@
 /**
  * packages/agent/nodes/selectContact.ts
- * Node: select_contact (wholesale coordination)
+ * Node: select_contact
  * Owner: Aryan
  *
- * Picks the right supplier-side contact for the current ladder rung.
- * Exits to: "plan_call" | "escalate" (when no eligible contact remains)
+ * Picks the right business contact for the current escalation rung.
+ * Exits to: "plan_call" | "unresolved" (no eligible contact left)
  *
- * Selection criteria (all must pass):
- *   1. Belongs to the seller organisation on this order
- *   2. Not already dialled for this order
- *   3. Carries the product category the order is for
- *   4. Within their stated working hours, in THEIR timezone
- *   5. Not in cooldown (FR-7.3 — rate limiting, enforced in code)
- *   6. Ordered by escalationPriority ascending (1 = primary)
+ * Selection criteria (FR-3.2, all must pass):
+ *   1. Works for the seller on this order
+ *   2. Has recorded consent to receive coordination calls (FR-7.2)
+ *   3. Not already tried on this order
+ *   4. Covers the product category
+ *   5. Inside their working hours (FR-7.3)
+ *   6. Not in cooldown (FR-3.4)
+ *   7. Ordered by escalationPriority ascending (1 = primary)
  *
- * Consent is NOT checked here — it is enforced one layer down, immediately
- * before dialling, so that no path into the call layer can skip it.
+ * The roster comes from the backend (Sameer) via AgentDependencies.getContacts.
+ * This node never reads a database.
  */
 
-import type { Contact } from "../../types/wholesale";
-import type { CoordinationState } from "../coordinationState";
+import type { Contact, Urgency } from "../../types";
+import type { CoordinationState } from "../state";
+
+export type SelectContactResult = "plan_call" | "unresolved";
 
 /**
- * Minutes since midnight in an IANA timezone, for "is it their working day?".
- *
- * Uses Intl rather than arithmetic on the UTC offset, because offsets shift
- * with daylight saving and a hard-coded one silently calls people at 03:00
- * twice a year.
+ * Why a contact was skipped. Surfaced in the audit trail so an operator can see
+ * that the ladder was exhausted for a *reason*, not by accident.
  */
-function minutesOfDayIn(timezone: string, now: Date): number {
+export interface ContactRejection {
+  contactId: string;
+  name: string;
+  reason: string;
+}
+
+export interface SelectContactOptions {
+  /** Product category this order needs cover for. Defaults to the item SKU's category. */
+  requiredCategory?: string;
+  /** Injected in tests. */
+  now?: Date;
+  /**
+   * FR-7.3 — whether an URGENT order may call outside working hours.
+   *
+   * Defaults to FALSE. Working hours are a consent boundary for a business
+   * contact, not a convenience setting, so overriding them is an explicit
+   * decision the backend makes per facility — never a default the agent
+   * assumes.
+   */
+  allowOutsideWorkingHours?: boolean;
+}
+
+/**
+ * Is `now` inside the contact's working hours, in THEIR timezone?
+ *
+ * Working hours are stored as HH:mm local to `workingHours.timezone`, so we
+ * compare against the wall-clock time in that zone rather than the server's.
+ * Getting this wrong rings a supplier in Mumbai at 3 a.m. because the server
+ * runs in UTC.
+ */
+export function isWithinWorkingHours(contact: Contact, now: Date = new Date()): boolean {
+  const minutesNow = wallClockMinutes(now, contact.workingHours.timezone);
+  if (minutesNow === null) return false;
+
+  const start = parseHHMM(contact.workingHours.start);
+  const end = parseHHMM(contact.workingHours.end);
+  if (start === null || end === null) return false;
+
+  // Windows that cross midnight (e.g. 22:00 → 06:00).
+  return start <= end
+    ? minutesNow >= start && minutesNow < end
+    : minutesNow >= start || minutesNow < end;
+}
+
+function parseHHMM(value: string): number | null {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+
+  return hours * 60 + minutes;
+}
+
+/** Minutes since midnight at `now`, in `timezone`. Null if the zone is invalid. */
+function wallClockMinutes(now: Date, timezone: string): number | null {
   try {
     const parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone: timezone,
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
+      timeZone: timezone,
     }).formatToParts(now);
 
-    const hour = Number(parts.find((p) => p.type === "hour")?.value ?? NaN);
-    const minute = Number(parts.find((p) => p.type === "minute")?.value ?? NaN);
-    if (Number.isNaN(hour) || Number.isNaN(minute)) return NaN;
+    const hour = Number(parts.find((p) => p.type === "hour")?.value);
+    const minute = Number(parts.find((p) => p.type === "minute")?.value);
+    if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
 
     return hour * 60 + minute;
   } catch {
-    // An invalid timezone string must not be read as "always available".
-    return NaN;
+    // An invalid timezone must not silently widen the calling window.
+    return null;
   }
 }
 
-/** "HH:mm" → minutes since midnight, or NaN if malformed. */
-function parseHHMM(value: string): number {
-  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
-  if (!match) return NaN;
-
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
-  if (hour > 23 || minute > 59) return NaN;
-
-  return hour * 60 + minute;
-}
-
-/**
- * Is this contact inside their working hours right now?
- *
- * Fails CLOSED: if the timezone or the hours cannot be parsed we treat the
- * contact as unavailable rather than dialling them on a guess.
- */
-export function isWithinWorkingHours(contact: Contact, now = new Date()): boolean {
-  const nowMinutes = minutesOfDayIn(contact.workingHours.timezone, now);
-  const start = parseHHMM(contact.workingHours.start);
-  const end = parseHHMM(contact.workingHours.end);
-
-  if (Number.isNaN(nowMinutes) || Number.isNaN(start) || Number.isNaN(end)) {
-    return false;
-  }
-
-  // A window that crosses midnight (e.g. 22:00 → 06:00) wraps.
-  return start <= end
-    ? nowMinutes >= start && nowMinutes < end
-    : nowMinutes >= start || nowMinutes < end;
-}
-
-/** FR-7.3 — has this contact's rate-limit cooldown expired? */
-export function isNotInCooldown(contact: Contact, now = new Date()): boolean {
+/** FR-3.4 — a contact inside their cooldown window is not called again. */
+export function isOutOfCooldown(contact: Contact, now: Date = new Date()): boolean {
   if (!contact.cooldownUntil) return true;
 
-  const until = new Date(contact.cooldownUntil);
-  // An unparseable cooldown is treated as still active — fail closed.
-  if (Number.isNaN(until.getTime())) return false;
+  const until = new Date(contact.cooldownUntil).getTime();
+  // An unparseable cooldown fails closed: we do not call.
+  if (Number.isNaN(until)) return false;
 
-  return now > until;
+  return now.getTime() >= until;
+}
+
+/** FR-7.2 — no consent record, no call. There is no override path. */
+export function hasConsent(contact: Contact): boolean {
+  if (!contact.consentAt) return false;
+  return !Number.isNaN(new Date(contact.consentAt).getTime());
+}
+
+export interface SelectionOutcome {
+  contact: Contact | null;
+  /** Every contact considered and why it was skipped. Audit trail. */
+  rejections: ContactRejection[];
 }
 
 /**
- * Selects the next contact to dial, or null when the ladder is out of people.
- *
- * A null return is not an error — it is how the graph learns to escalate and,
- * once the rungs are spent, to mark the order UNRESOLVED.
+ * Selects the best eligible contact from the roster.
+ * Returns null when none is eligible, which routes to unresolved.
  */
 export function selectBestContact(
   state: CoordinationState,
-  directory: Contact[],
-  now = new Date()
-): Contact | null {
-  return selectContactWithReason(state, directory, now).contact;
-}
+  roster: Contact[],
+  options: SelectContactOptions = {}
+): SelectionOutcome {
+  const now = options.now ?? new Date();
+  const requiredCategory = options.requiredCategory;
+  const rejections: ContactRejection[] = [];
 
-/** Why the ladder produced nobody. Drives an honest outcome, not a guess. */
-export type NoContactReason =
-  | "none_at_seller"
-  | "all_attempted"
-  | "no_product_match"
-  | "outside_working_hours"
-  | "in_cooldown";
-
-export interface ContactSelection {
-  contact: Contact | null;
-  /** Null when a contact was found. */
-  reason: NoContactReason | null;
-  /** Human-readable, for the audit trail and the operator. */
-  detail: string;
-}
-
-/**
- * Selects the next contact AND explains a null.
- *
- * The explanation matters: "everyone is off shift until 09:00" and "we have
- * called everyone and nobody committed" both produce no contact, but they are
- * different situations for the operator — one waits, the other needs a person
- * now. Reporting both as "ladder exhausted" would be a lie of omission.
- */
-export function selectContactWithReason(
-  state: CoordinationState,
-  directory: Contact[],
-  now = new Date()
-): ContactSelection {
-  const sellerId = state.order.seller.id;
-  const sku = state.order.item.sku;
-  const description = state.order.item.description;
-
-  const atSeller = directory.filter((c) => c.organizationId === sellerId);
-  if (atSeller.length === 0) {
-    return {
-      contact: null,
-      reason: "none_at_seller",
-      detail: `No consented contacts on file for ${state.order.seller.name}.`,
+  const eligible = roster.filter((contact) => {
+    const reject = (reason: string) => {
+      rejections.push({ contactId: contact.id, name: contact.name, reason });
+      return false;
     };
-  }
 
-  const notYetTried = atSeller.filter((c) => !state.attemptedContacts.includes(c.id));
-  if (notYetTried.length === 0) {
-    return {
-      contact: null,
-      reason: "all_attempted",
-      detail: `Every contact at ${state.order.seller.name} has already been called for this order.`,
-    };
-  }
+    if (contact.organizationId !== state.seller.id) {
+      return reject(`Works for ${contact.organizationId}, not ${state.seller.id}.`);
+    }
+    if (!hasConsent(contact)) {
+      return reject("No recorded consent to receive coordination calls (FR-7.2).");
+    }
+    if (state.attemptedContacts.includes(contact.id)) {
+      return reject("Already tried on this order.");
+    }
+    if (requiredCategory && !contact.productCategories.includes(requiredCategory)) {
+      return reject(`Does not cover product category "${requiredCategory}".`);
+    }
+    if (!isOutOfCooldown(contact, now)) {
+      return reject(`In cooldown until ${contact.cooldownUntil} (FR-3.4).`);
+    }
+    if (!options.allowOutsideWorkingHours && !isWithinWorkingHours(contact, now)) {
+      return reject(
+        `Outside working hours ${contact.workingHours.start}–${contact.workingHours.end} ` +
+        `${contact.workingHours.timezone} (FR-7.3).`
+      );
+    }
 
-  const rightProduct = notYetTried.filter((c) => coversProduct(c, sku, description));
-  if (rightProduct.length === 0) {
-    return {
-      contact: null,
-      reason: "no_product_match",
-      detail: `No remaining contact at ${state.order.seller.name} handles ${description}.`,
-    };
-  }
+    return true;
+  });
 
-  const onShift = rightProduct.filter((c) => isWithinWorkingHours(c, now));
-  if (onShift.length === 0) {
-    const next = rightProduct[0].workingHours;
-    return {
-      contact: null,
-      reason: "outside_working_hours",
-      detail:
-        `Every remaining contact at ${state.order.seller.name} is outside working hours ` +
-        `(${next.start}–${next.end} ${next.timezone}).`,
-    };
-  }
+  eligible.sort((a, b) => a.escalationPriority - b.escalationPriority);
 
-  const available = onShift
-    .filter((c) => isNotInCooldown(c, now))
-    .sort((a, b) => a.escalationPriority - b.escalationPriority);
-
-  if (available.length === 0) {
-    return {
-      contact: null,
-      reason: "in_cooldown",
-      detail: `Every remaining contact at ${state.order.seller.name} is in call-rate cooldown.`,
-    };
-  }
-
-  return { contact: available[0], reason: null, detail: "" };
+  return { contact: eligible[0] ?? null, rejections };
 }
 
 /**
- * Does this contact handle the product on the order?
+ * FR-7.3 — whether this order's urgency justifies calling outside working
+ * hours, given a facility policy that permits it at all.
  *
- * A contact with no declared categories is a generalist and matches anything;
- * otherwise we look for a category token appearing in the SKU or description.
- * Matching is deliberately loose — the cost of a false negative (nobody gets
- * called) is higher than a false positive (the wrong specialist redirects us).
+ * Kept separate from `selectBestContact` so the policy decision is visible and
+ * testable rather than buried in a filter. Only URGENT ever qualifies.
  */
-function coversProduct(contact: Contact, sku: string, description: string): boolean {
-  if (contact.productCategories.length === 0) return true;
-
-  const haystack = `${sku} ${description}`.toLowerCase();
-  return contact.productCategories.some((category) =>
-    haystack.includes(category.toLowerCase())
-  );
+export function mayOverrideWorkingHours(
+  urgency: Urgency,
+  policyAllowsOverride: boolean
+): boolean {
+  return policyAllowsOverride && urgency === "URGENT";
 }
