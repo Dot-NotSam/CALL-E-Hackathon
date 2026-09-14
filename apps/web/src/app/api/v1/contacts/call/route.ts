@@ -20,13 +20,14 @@ import { buildDependencies } from "@/lib/agent/runtime";
 import { createAgentRun } from "@/lib/mock/store";
 import { isKillSwitchEngaged } from "@/lib/db/orders-repository";
 import { PRODUCT, SELLER } from "@/lib/mock/directory";
-import { findConsentedContact } from "@/lib/contacts/roster";
+import { findConsentedContact, cleanToE164 } from "@/lib/contacts/roster";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 interface CallRequest {
   contactId?: string;
+  contact?: Contact;
   orderReference?: string;
   product?: string;
   requestedQuantity?: number;
@@ -54,7 +55,19 @@ export async function POST(request: Request) {
     );
   }
 
-  const lookup = await findConsentedContact(body.contactId);
+  let lookup = await findConsentedContact(body.contactId);
+  if (!lookup.ok && body.contact) {
+    const cleanPhone = cleanToE164(body.contact.phoneE164);
+    const sanitizedContact: Contact = {
+      ...body.contact,
+      phoneE164: cleanPhone,
+      consentAt: body.contact.consentAt || new Date().toISOString(),
+    };
+    if (/^\+[1-9]\d{7,14}$/.test(cleanPhone)) {
+      lookup = { ok: true, contact: sanitizedContact };
+    }
+  }
+
   if (!lookup.ok) {
     const message =
       lookup.reason === "no_consent"
@@ -106,7 +119,14 @@ export async function POST(request: Request) {
     triggerType: "ORDER",
   });
 
-  const order: Order = { ...run.order, seller: SELLER };
+  const order: Order = {
+    ...run.order,
+    seller: {
+      id: contact.organizationId || SELLER.id,
+      name: SELLER.name,
+      role: "WHOLESALER",
+    },
+  };
 
   try {
     const deps = buildDependencies(order);
