@@ -123,7 +123,9 @@ export function CommandBar({ killSwitch }: { killSwitch: KillSwitchState }) {
           </StateChip>
         )}
 
-        <RoleSelector currentRole={profile?.role} onRoleChange={(r) => switchRole(r)} />
+        {process.env.NODE_ENV === "development" && (
+          <RoleSelector currentRole={profile?.role} onRoleChange={(r) => switchRole(r)} />
+        )}
 
         <span className="hidden h-4 w-px bg-line sm:block" aria-hidden />
 
